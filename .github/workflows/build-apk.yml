@@ -54,4 +54,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag -y || true
-          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 微信专用极速版" --notes "仅在微信 com.tencent.mm 中响应；优先识别“微信红包/恭喜发财，大吉大利”，随后极速识别中央“開/开”按钮。"
+          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 1次+2次极速版" --notes "第一阶段：识别微信红包后只点击1次。第二阶段：识别中央“開/开”按钮后在同一圆心快速点击2次。已修复弹窗根节点不稳定导致识别成功但不执行点击的问题。"
