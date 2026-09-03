@@ -5,7 +5,6 @@ import android.app.NotificationChannel;
 import android.app.NotificationManager;
 import android.app.PendingIntent;
 import android.app.Service;
-import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ServiceInfo;
 import android.graphics.Bitmap;
@@ -126,9 +125,9 @@ public class CaptureService extends Service {
         screenHeight = metrics.heightPixels;
         densityDpi = metrics.densityDpi;
 
-        // Capture at a reduced resolution. This keeps the same aspect/layout while cutting
-        // the number of pixels that must be copied and analyzed by roughly 3-5x.
-        float captureScale = Math.min(1f, 540f / Math.max(1, screenWidth));
+        // 480px-wide capture is enough for these two large visual targets and reduces
+        // pixel copying/analysis substantially on 1080p/1440p phones.
+        float captureScale = Math.min(1f, 480f / Math.max(1, screenWidth));
         captureWidth = Math.max(1, Math.round(screenWidth * captureScale));
         captureHeight = Math.max(1, Math.round(screenHeight * captureScale));
         captureDensityDpi = Math.max(1, Math.round(densityDpi * captureScale));
@@ -151,7 +150,7 @@ public class CaptureService extends Service {
             }
         }, mainHandler);
 
-        imageReader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 3);
+        imageReader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 2);
         virtualDisplay = mediaProjection.createVirtualDisplay(
                 "AutoImageClickerDisplay",
                 captureWidth,
@@ -170,9 +169,7 @@ public class CaptureService extends Service {
         lastAnalyzeTime = 0;
         lastClickTime = 0;
         running = true;
-        showToast("极速识别已启动");
-
-        // Try immediately in case the target is already visible when capture starts.
+        showToast("微信专用极速识别已启动");
         scheduleAccessibilityFastPath();
     }
 
@@ -184,30 +181,29 @@ public class CaptureService extends Service {
             fastPathPending = false;
             if (!running) return;
             long now = System.currentTimeMillis();
-            if (now - lastFastPathTime < 12) return;
+            if (now - lastFastPathTime < 5) return;
             lastFastPathTime = now;
             analyzeAccessibility(now);
         });
     }
 
     private boolean analyzeAccessibility(long now) {
-        if (!AutoClickAccessibilityService.isConnected()) return false;
+        if (!AutoClickAccessibilityService.isConnected() || !AutoClickAccessibilityService.isWeChatForeground()) return false;
 
         if (state == 1) {
-            if (now - stateSince > 2800) {
+            if (now - stateSince > 2400) {
                 state = 0;
-                cooldownUntil = now + 180;
+                cooldownUntil = now + 80;
                 return false;
             }
-            if (now - lastClickTime >= 45 && AutoClickAccessibilityService.clickCenterTextIfPresent("開", "开")) {
+            if (now - lastClickTime >= 12 && AutoClickAccessibilityService.clickWeChatOpenButton()) {
                 lastClickTime = now;
                 state = 0;
-                cooldownUntil = now + 220;
+                cooldownUntil = now + 120;
                 return true;
             }
         } else {
-            if (now >= cooldownUntil && now - lastClickTime >= 160
-                    && AutoClickAccessibilityService.clickLatestTextIfPresent("微信红包")) {
+            if (now >= cooldownUntil && now - lastClickTime >= 80 && AutoClickAccessibilityService.clickWeChatRedPacket()) {
                 lastClickTime = now;
                 state = 1;
                 stateSince = now;
@@ -224,10 +220,15 @@ public class CaptureService extends Service {
             if (image == null || !running) return;
             long now = System.currentTimeMillis();
 
-            // UI-tree matching is much faster and more exact than image matching.
+            // Do nothing outside WeChat. This is both safer and faster.
+            if (!AutoClickAccessibilityService.isWeChatForeground()) return;
+
+            // Accessibility tree is the primary fast path.
             if (analyzeAccessibility(now)) return;
 
-            long interval = state == 1 ? 18 : 32;
+            // A 60 Hz screen only produces a new frame about every 16.7 ms. These limits
+            // therefore avoid redundant work while still analyzing essentially every frame.
+            long interval = state == 1 ? 10 : 18;
             if (now - lastAnalyzeTime < interval) return;
             lastAnalyzeTime = now;
 
@@ -245,27 +246,27 @@ public class CaptureService extends Service {
     }
 
     private void analyzeFrame(Bitmap frame, long now) {
-        if (!AutoClickAccessibilityService.isConnected()) return;
+        if (!AutoClickAccessibilityService.isConnected() || !AutoClickAccessibilityService.isWeChatForeground()) return;
 
         if (state == 1) {
-            if (now - stateSince > 2800) {
+            if (now - stateSince > 2400) {
                 state = 0;
-                cooldownUntil = now + 180;
+                cooldownUntil = now + 80;
                 return;
             }
 
             VisionDetector.Match open = VisionDetector.detectOpenButton(frame);
-            if (open != null && now - lastClickTime >= 45) {
+            if (open != null && now - lastClickTime >= 12) {
                 if (AutoClickAccessibilityService.clickAt(open.x * clickScaleX, open.y * clickScaleY)) {
                     lastClickTime = now;
                     state = 0;
-                    cooldownUntil = now + 220;
+                    cooldownUntil = now + 120;
                 }
             }
             return;
         }
 
-        if (now < cooldownUntil || now - lastClickTime < 160) return;
+        if (now < cooldownUntil || now - lastClickTime < 80) return;
         VisionDetector.Match redPacket = VisionDetector.detectRedPacket(frame);
         if (redPacket != null) {
             if (AutoClickAccessibilityService.clickAt(redPacket.x * clickScaleX, redPacket.y * clickScaleY)) {
@@ -301,9 +302,7 @@ public class CaptureService extends Service {
     }
 
     private void releaseCaptureObjects(boolean stopProjection) {
-        if (imageReader != null) {
-            imageReader.setOnImageAvailableListener(null, null);
-        }
+        if (imageReader != null) imageReader.setOnImageAvailableListener(null, null);
         if (virtualDisplay != null) {
             try { virtualDisplay.release(); } catch (Throwable ignored) {}
             virtualDisplay = null;
@@ -338,7 +337,7 @@ public class CaptureService extends Service {
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "自动识别", NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("自动识别点击器运行状态");
+            channel.setDescription("微信红包自动识别运行状态");
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             nm.createNotificationChannel(channel);
         }
@@ -354,8 +353,8 @@ public class CaptureService extends Service {
 
         return new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setContentTitle("自动识别点击器正在运行")
-                .setContentText("极速检测红包和“开”按钮")
+                .setContentTitle("微信专用极速点击器正在运行")
+                .setContentText("仅在微信中检测红包与“開/开”按钮")
                 .setContentIntent(contentIntent)
                 .setOngoing(true)
                 .addAction(new Notification.Action.Builder(null, "停止", stopIntent).build())

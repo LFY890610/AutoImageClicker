@@ -6,7 +6,7 @@ on:
   workflow_dispatch:
 
 concurrency:
-  group: build-apk-latest
+  group: autoimageclicker-latest
   cancel-in-progress: true
 
 permissions:
@@ -54,4 +54,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag -y || true
-          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 极速版" --notes "提高识别准确率与点击响应速度的自动构建版本。"
+          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 微信专用极速版" --notes "仅在微信 com.tencent.mm 中响应；优先识别“微信红包/恭喜发财，大吉大利”，随后极速识别中央“開/开”按钮。"

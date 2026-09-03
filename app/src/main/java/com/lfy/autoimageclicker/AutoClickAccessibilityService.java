@@ -8,10 +8,10 @@ import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
 import java.lang.ref.WeakReference;
-import java.util.ArrayDeque;
-import java.util.Deque;
+import java.util.List;
 
 public class AutoClickAccessibilityService extends AccessibilityService {
+    private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static volatile WeakReference<AutoClickAccessibilityService> instance = new WeakReference<>(null);
 
     @Override
@@ -22,15 +22,15 @@ public class AutoClickAccessibilityService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        // Fast path: react to UI changes immediately instead of waiting for the next screenshot.
-        if (CaptureService.isRunning()) {
+        if (!CaptureService.isRunning() || event == null) return;
+        CharSequence pkg = event.getPackageName();
+        if (pkg != null && WECHAT_PACKAGE.contentEquals(pkg)) {
             CaptureService.requestAccessibilityFastPath();
         }
     }
 
     @Override
-    public void onInterrupt() {
-    }
+    public void onInterrupt() {}
 
     @Override
     public boolean onUnbind(android.content.Intent intent) {
@@ -42,10 +42,17 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         return instance.get() != null;
     }
 
-    public static boolean clickAt(float x, float y) {
+    public static boolean isWeChatForeground() {
         AutoClickAccessibilityService service = instance.get();
         if (service == null) return false;
+        AccessibilityNodeInfo root = service.getRootInActiveWindow();
+        if (root == null || root.getPackageName() == null) return false;
+        return WECHAT_PACKAGE.contentEquals(root.getPackageName());
+    }
 
+    public static boolean clickAt(float x, float y) {
+        AutoClickAccessibilityService service = instance.get();
+        if (service == null || !isWeChatForeground()) return false;
         Path path = new Path();
         path.moveTo(x, y);
         GestureDescription gesture = new GestureDescription.Builder()
@@ -54,87 +61,138 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         return service.dispatchGesture(gesture, null, null);
     }
 
-    /** Click the lowest visible matching node. Useful for the newest visible WeChat red packet. */
-    public static boolean clickLatestTextIfPresent(String... terms) {
-        return clickBestTextNode(true, terms);
-    }
-
-    /** Click the matching node nearest to screen center. Useful for the open button. */
-    public static boolean clickCenterTextIfPresent(String... terms) {
-        return clickBestTextNode(false, terms);
-    }
-
-    public static boolean clickTextIfPresent(String... terms) {
-        return clickBestTextNode(false, terms);
-    }
-
-    private static boolean clickBestTextNode(boolean preferBottom, String... terms) {
+    /**
+     * Fast red-packet path. Search the exact label first, then prefer the newest/lower
+     * matching bubble. The greeting text is used as a strong bonus when exposed by WeChat.
+     */
+    public static boolean clickWeChatRedPacket() {
         AutoClickAccessibilityService service = instance.get();
         if (service == null) return false;
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
-        if (root == null) return false;
+        if (root == null || root.getPackageName() == null || !WECHAT_PACKAGE.contentEquals(root.getPackageName())) return false;
 
-        Deque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
-        queue.add(root);
+        List<AccessibilityNodeInfo> labels = root.findAccessibilityNodeInfosByText("微信红包");
+        if (labels == null || labels.isEmpty()) return false;
+
         AccessibilityNodeInfo best = null;
-        double bestScore = -Double.MAX_VALUE;
-        int visited = 0;
-        Rect rootBounds = new Rect();
-        root.getBoundsInScreen(rootBounds);
-        float cx = rootBounds.exactCenterX();
-        float cy = rootBounds.exactCenterY();
-        if (cx <= 0) cx = 540;
-        if (cy <= 0) cy = 960;
+        double bestScore = -1e30;
+        for (AccessibilityNodeInfo label : labels) {
+            if (label == null || !label.isVisibleToUser()) continue;
+            AccessibilityNodeInfo candidate = findClickableAncestor(label, 8);
+            if (candidate == null) candidate = label;
 
-        while (!queue.isEmpty() && visited < 900) {
-            AccessibilityNodeInfo node = queue.removeFirst();
-            visited++;
-            if (node == null) continue;
+            Rect r = new Rect();
+            candidate.getBoundsInScreen(r);
+            if (r.isEmpty()) continue;
 
-            CharSequence text = node.getText();
-            CharSequence desc = node.getContentDescription();
-            if (node.isVisibleToUser() && (matches(text, terms) || matches(desc, terms))) {
-                AccessibilityNodeInfo clickable = node;
-                int parents = 0;
-                while (clickable != null && !clickable.isClickable() && parents < 7) {
-                    clickable = clickable.getParent();
-                    parents++;
+            double score = r.bottom * 20.0 + r.centerY();
+            AccessibilityNodeInfo context = candidate;
+            for (int i = 0; i < 3 && context != null; i++) {
+                if (subtreeContains(context, "恭喜发财，大吉大利") || subtreeContains(context, "恭喜发财")) {
+                    score += 1_000_000.0;
+                    break;
                 }
-                if (clickable != null && clickable.isVisibleToUser()) {
-                    Rect r = new Rect();
-                    clickable.getBoundsInScreen(r);
-                    if (!r.isEmpty()) {
-                        double score;
-                        if (preferBottom) {
-                            score = r.bottom * 10.0 + r.centerY();
-                        } else {
-                            double dx = r.exactCenterX() - cx;
-                            double dy = r.exactCenterY() - cy;
-                            score = -(dx * dx + dy * dy);
-                        }
-                        if (score > bestScore) {
-                            bestScore = score;
-                            best = clickable;
-                        }
-                    }
-                }
+                context = context.getParent();
             }
-
-            for (int i = 0; i < node.getChildCount(); i++) {
-                AccessibilityNodeInfo child = node.getChild(i);
-                if (child != null) queue.addLast(child);
+            if (score > bestScore) {
+                bestScore = score;
+                best = candidate;
             }
         }
-
-        return best != null && best.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+        return performClickOrCenter(best);
     }
 
-    private static boolean matches(CharSequence value, String... terms) {
-        if (value == null) return false;
-        String s = value.toString().trim();
+    /** Fast open-button path. Only accept an exposed 開/开 node near screen center. */
+    public static boolean clickWeChatOpenButton() {
+        AutoClickAccessibilityService service = instance.get();
+        if (service == null) return false;
+        AccessibilityNodeInfo root = service.getRootInActiveWindow();
+        if (root == null || root.getPackageName() == null || !WECHAT_PACKAGE.contentEquals(root.getPackageName())) return false;
+
+        Rect rootRect = new Rect();
+        root.getBoundsInScreen(rootRect);
+        float cx = rootRect.exactCenterX();
+        float cy = rootRect.exactCenterY();
+        if (cx <= 0 || cy <= 0) return false;
+
+        AccessibilityNodeInfo best = null;
+        double bestScore = -1e30;
+        String[] terms = {"開", "开"};
         for (String term : terms) {
-            if (term != null && !term.isEmpty() && s.contains(term)) return true;
+            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(term);
+            if (nodes == null) continue;
+            for (AccessibilityNodeInfo node : nodes) {
+                if (node == null || !node.isVisibleToUser()) continue;
+                CharSequence text = node.getText();
+                CharSequence desc = node.getContentDescription();
+                if (!isExactOpen(text) && !isExactOpen(desc)) continue;
+
+                AccessibilityNodeInfo candidate = findClickableAncestor(node, 5);
+                if (candidate == null) candidate = node;
+                Rect r = new Rect();
+                candidate.getBoundsInScreen(r);
+                if (r.isEmpty()) continue;
+
+                float dx = r.exactCenterX() - cx;
+                float dy = r.exactCenterY() - cy;
+                if (Math.abs(dx) > rootRect.width() * 0.30f || Math.abs(dy) > rootRect.height() * 0.32f) continue;
+                double score = -(dx * dx + dy * dy);
+                if (score > bestScore) {
+                    bestScore = score;
+                    best = candidate;
+                }
+            }
+        }
+        return performClickOrCenter(best);
+    }
+
+    private static AccessibilityNodeInfo findClickableAncestor(AccessibilityNodeInfo node, int maxParents) {
+        AccessibilityNodeInfo cur = node;
+        for (int i = 0; cur != null && i <= maxParents; i++) {
+            if (cur.isVisibleToUser() && cur.isClickable()) return cur;
+            cur = cur.getParent();
+        }
+        return null;
+    }
+
+    private static boolean performClickOrCenter(AccessibilityNodeInfo node) {
+        if (node == null) return false;
+        if (node.isClickable() && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true;
+        Rect r = new Rect();
+        node.getBoundsInScreen(r);
+        if (r.isEmpty()) return false;
+        return clickAt(r.exactCenterX(), r.exactCenterY());
+    }
+
+    private static boolean subtreeContains(AccessibilityNodeInfo root, String needle) {
+        if (root == null || needle == null) return false;
+        CharSequence t = root.getText();
+        CharSequence d = root.getContentDescription();
+        if ((t != null && t.toString().contains(needle)) || (d != null && d.toString().contains(needle))) return true;
+        int n = Math.min(root.getChildCount(), 20);
+        for (int i = 0; i < n; i++) {
+            AccessibilityNodeInfo child = root.getChild(i);
+            if (child != null && subtreeContainsShallow(child, needle, 2)) return true;
         }
         return false;
+    }
+
+    private static boolean subtreeContainsShallow(AccessibilityNodeInfo node, String needle, int depth) {
+        if (node == null) return false;
+        CharSequence t = node.getText();
+        CharSequence d = node.getContentDescription();
+        if ((t != null && t.toString().contains(needle)) || (d != null && d.toString().contains(needle))) return true;
+        if (depth <= 0) return false;
+        int n = Math.min(node.getChildCount(), 12);
+        for (int i = 0; i < n; i++) {
+            if (subtreeContainsShallow(node.getChild(i), needle, depth - 1)) return true;
+        }
+        return false;
+    }
+
+    private static boolean isExactOpen(CharSequence value) {
+        if (value == null) return false;
+        String s = value.toString().trim();
+        return "開".equals(s) || "开".equals(s);
     }
 }

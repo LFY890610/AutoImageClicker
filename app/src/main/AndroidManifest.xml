@@ -6,8 +6,8 @@
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
     <application
-        android:allowBackup="true"
-        android:label="自动识别点击器"
+        android:allowBackup="false"
+        android:label="微信专用极速点击器"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
@@ -28,7 +28,7 @@
         <service
             android:name=".AutoClickAccessibilityService"
             android:exported="false"
-            android:label="自动识别点击器"
+            android:label="微信专用极速点击器"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
