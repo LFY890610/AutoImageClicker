@@ -17,145 +17,105 @@ public final class VisionDetector {
     }
 
     /**
-     * Strict WeChat red-packet fallback detector tuned for the supplied target layout.
-     * A candidate must simultaneously contain:
-     * 1) a wide orange card, 2) a red envelope on the left, 3) a yellow coin inside it,
-     * 4) a white greeting region in the upper-right, and 5) a white "WeChat red packet"
-     * label region below. This is intentionally stricter than simple color matching so that
-     * colorful emoji/stickers are rejected.
+     * Fast strict WeChat red-packet detector.
+     *
+     * The old detector scanned many rectangle sizes across the whole screen. This version starts
+     * from the rare yellow-coin feature, then verifies the red envelope and the two white-text
+     * zones around it. That cuts candidate work dramatically while still rejecting emoji/stickers.
      */
     public static Match detectRedPacket(Bitmap source) {
-        Frame f = Frame.from(source, 480);
+        Frame f = Frame.from(source, 420);
         if (f == null) return null;
+
         int[] orange = integral(f, 0);
         int[] red = integral(f, 1);
         int[] white = integral(f, 2);
         int[] yellow = integral(f, 6);
 
         double best = 0;
-        int bestCardX = 0, bestCardY = 0, bestCardW = 0, bestCardH = 0;
+        int bestX = 0, bestY = 0, bestW = 0, bestH = 0;
 
-        // Search by the distinctive left envelope icon, then validate the whole card geometry.
-        double[] iconWidthRatios = {0.045, 0.055, 0.065, 0.075, 0.085, 0.095, 0.105, 0.115};
-        double[] iconHeightRatios = {1.15, 1.24, 1.33, 1.42};
-        double[] cardWidthMultipliers = {7.0, 7.6, 8.2, 8.8};
-        double[] cardHeightMultipliers = {1.95, 2.10, 2.25, 2.40};
-        int step = 3;
-        int yMin = (int) (f.h * 0.04);
-        int yMax = (int) (f.h * 0.94);
+        // The supplied WeChat packet uses a small portrait red-envelope icon at the left of a
+        // much wider orange card. Five icon scales are enough for common phone DPIs.
+        double[] widthRatios = {0.055, 0.070, 0.085, 0.100, 0.115};
+        int step = Math.max(4, f.w / 120);
+        int xMin = 0;
+        int xMax = (int) (f.w * 0.94);
+        int yMin = (int) (f.h * 0.05);
+        int yMax = (int) (f.h * 0.93);
 
-        for (double wr : iconWidthRatios) {
-            int iw = Math.max(12, (int) (f.w * wr));
-            for (double hr : iconHeightRatios) {
-                int ih = Math.max(14, (int) (iw * hr));
-                if (iw >= f.w || ih >= f.h) continue;
+        for (double wr : widthRatios) {
+            int ww = Math.max(14, (int) (f.w * wr));
+            int hh = Math.max(17, (int) (ww * 1.22));
+            if (ww >= f.w || hh >= f.h) continue;
 
-                for (int y = yMin; y + ih < yMax; y += step) {
-                    for (int x = 0; x + iw < f.w; x += step) {
-                        // The envelope itself must be strongly red.
-                        double redFrac = frac(red, f.w, x, y, iw, ih);
-                        if (redFrac < 0.53) continue;
+            int coinW = Math.max(6, (int) (ww * 0.52));
+            int coinH = Math.max(6, (int) (hh * 0.42));
+            int coinOffX = (ww - coinW) / 2;
+            int coinOffY = (int) (hh * 0.27);
 
-                        // Its yellow coin must sit near the upper-middle of the envelope.
-                        int coinW = Math.max(4, (int) (iw * 0.52));
-                        int coinH = Math.max(4, (int) (ih * 0.36));
-                        int coinX = x + (iw - coinW) / 2;
-                        int coinY = y + (int) (ih * 0.24);
-                        double yellowFrac = frac(yellow, f.w, coinX, coinY, coinW, coinH);
-                        if (yellowFrac < 0.020) continue;
+            for (int y = yMin; y + hh < yMax; y += step) {
+                for (int x = xMin; x + ww < xMax; x += step) {
+                    // Cheap rare-feature gate first. Most screen locations die here after one O(1)
+                    // integral lookup, instead of running the full packet checks.
+                    double yellowFrac = frac(yellow, f.w,
+                            x + coinOffX, y + coinOffY, coinW, coinH);
+                    if (yellowFrac < 0.055) continue;
 
-                        for (double cwm : cardWidthMultipliers) {
-                            int cw = (int) (iw * cwm);
-                            for (double chm : cardHeightMultipliers) {
-                                int ch = (int) (ih * chm);
+                    double redFrac = frac(red, f.w, x, y, ww, hh);
+                    if (redFrac < 0.44) continue;
 
-                                // In the supplied target the icon begins about 5% into the card.
-                                int cx = x - (int) (iw * 0.38);
-                                int cy = y - (int) (ih * 0.18);
-                                if (cx < 0 || cy < 0 || cx + cw > f.w || cy + ch > f.h) continue;
+                    // Full orange card around the icon. Stickers normally fail this because they
+                    // do not contain a large, nearly uniform, wide orange message card.
+                    int cardX = Math.max(0, x - (int) (ww * 0.25));
+                    int cardY = Math.max(0, y - (int) (hh * 0.18));
+                    int cardR = Math.min(f.w, x + (int) (ww * 6.35));
+                    int cardB = Math.min(f.h, y + (int) (hh * 2.05));
+                    if (cardR - cardX < ww * 4 || cardB - cardY < hh) continue;
+                    double cardOrange = frac(orange, f.w,
+                            cardX, cardY, cardR - cardX, cardB - cardY);
+                    if (cardOrange < 0.43) continue;
 
-                                double aspect = cw / (double) ch;
-                                if (aspect < 2.35 || aspect > 3.55) continue;
+                    // Top-right white greeting: “恭喜发财，大吉大利”. We do not OCR it here;
+                    // accessibility handles exact text when available, while image fallback checks
+                    // the fixed white-text density/placement.
+                    int gx = Math.max(0, x + (int) (ww * 1.20));
+                    int gy = Math.max(0, y - (int) (hh * 0.04));
+                    int gr = Math.min(f.w, x + (int) (ww * 6.15));
+                    int gb = Math.min(f.h, y + (int) (hh * 0.95));
+                    if (gr <= gx || gb <= gy) continue;
+                    double greetingWhite = frac(white, f.w, gx, gy, gr - gx, gb - gy);
+                    double greetingOrange = frac(orange, f.w, gx, gy, gr - gx, gb - gy);
+                    if (greetingWhite < 0.018 || greetingOrange < 0.40) continue;
 
-                                // Whole-card orange occupancy must be high. Emoji/stickers usually
-                                // fail here because they do not form a large rectangular card.
-                                double wholeOrange = frac(orange, f.w, cx, cy, cw, ch);
-                                if (wholeOrange < 0.49) continue;
+                    // Separate lower “微信红包” line. Requiring a second white-text band at the
+                    // correct vertical offset is the strongest anti-emoji/sticker discriminator.
+                    int lx = Math.max(0, x - (int) (ww * 0.15));
+                    int ly = Math.max(0, y + (int) (hh * 1.06));
+                    int lr = Math.min(f.w, x + (int) (ww * 4.55));
+                    int lb = Math.min(f.h, y + (int) (hh * 1.88));
+                    if (lr <= lx || lb <= ly) continue;
+                    double labelWhite = frac(white, f.w, lx, ly, lr - lx, lb - ly);
+                    double labelOrange = frac(orange, f.w, lx, ly, lr - lx, lb - ly);
+                    if (labelWhite < 0.011 || labelOrange < 0.33) continue;
 
-                                // Validate the upper orange body in three separated bands, not just
-                                // one local patch. This makes random orange stickers much less likely.
-                                int upperH = (int) (ch * 0.68);
-                                double leftUpperOrange = frac(orange, f.w,
-                                        cx, cy, Math.max(1, (int) (cw * 0.24)), upperH);
-                                double midUpperOrange = frac(orange, f.w,
-                                        cx + (int) (cw * 0.24), cy,
-                                        Math.max(1, (int) (cw * 0.38)), upperH);
-                                double rightUpperOrange = frac(orange, f.w,
-                                        cx + (int) (cw * 0.62), cy,
-                                        Math.max(1, (int) (cw * 0.38)), upperH);
-                                if (leftUpperOrange < 0.36 || midUpperOrange < 0.46 || rightUpperOrange < 0.46) continue;
+                    double redScore = Math.min(1.0, redFrac / 0.70);
+                    double coinScore = Math.min(1.0, yellowFrac / 0.30);
+                    double cardScore = Math.min(1.0, cardOrange / 0.67);
+                    double greetingScore = Math.min(1.0, greetingWhite / 0.075);
+                    double labelScore = Math.min(1.0, labelWhite / 0.060);
+                    double score = redScore * 0.25
+                            + coinScore * 0.22
+                            + cardScore * 0.22
+                            + greetingScore * 0.17
+                            + labelScore * 0.14;
 
-                                // The red icon must be located in the left part of this very card.
-                                int iconZoneX = cx + (int) (cw * 0.025);
-                                int iconZoneY = cy + (int) (ch * 0.08);
-                                int iconZoneW = Math.max(1, (int) (cw * 0.20));
-                                int iconZoneH = Math.max(1, (int) (ch * 0.58));
-                                double leftRed = frac(red, f.w, iconZoneX, iconZoneY, iconZoneW, iconZoneH);
-                                double leftYellow = frac(yellow, f.w, iconZoneX, iconZoneY, iconZoneW, iconZoneH);
-                                if (leftRed < 0.20 || leftYellow < 0.006) continue;
-
-                                // Greeting: upper-right region must contain visible white text while
-                                // still being predominantly orange.
-                                int gx = cx + (int) (cw * 0.22);
-                                int gy = cy + (int) (ch * 0.10);
-                                int gw = Math.max(1, (int) (cw * 0.72));
-                                int gh = Math.max(1, (int) (ch * 0.43));
-                                double greetOrange = frac(orange, f.w, gx, gy, gw, gh);
-                                double greetWhite = frac(white, f.w, gx, gy, gw, gh);
-                                if (greetOrange < 0.44 || greetWhite < 0.020) continue;
-
-                                // Label: lower-left strip must separately contain white text. Requiring
-                                // two distinct white-text regions is a strong discriminator vs emoji.
-                                int lx = cx + (int) (cw * 0.018);
-                                int ly = cy + (int) (ch * 0.71);
-                                int lw = Math.max(1, (int) (cw * 0.42));
-                                int lh = Math.max(1, (int) (ch * 0.24));
-                                double labelOrange = frac(orange, f.w, lx, ly, lw, lh);
-                                double labelWhite = frac(white, f.w, lx, ly, lw, lh);
-                                if (labelOrange < 0.25 || labelWhite < 0.015) continue;
-
-                                // Right-lower region should remain mostly orange and not contain a
-                                // second large red icon, which filters several common red/orange emoji.
-                                int rlx = cx + (int) (cw * 0.48);
-                                int rly = cy + (int) (ch * 0.68);
-                                int rlw = Math.max(1, (int) (cw * 0.48));
-                                int rlh = Math.max(1, (int) (ch * 0.27));
-                                double lowerRightOrange = frac(orange, f.w, rlx, rly, rlw, rlh);
-                                double lowerRightRed = frac(red, f.w, rlx, rly, rlw, rlh);
-                                if (lowerRightOrange < 0.30 || lowerRightRed > 0.16) continue;
-
-                                double geometryScore = 1.0 - Math.min(1.0, Math.abs(aspect - 2.84) / 1.15);
-                                double redScore = Math.min(1.0, redFrac / 0.76);
-                                double yellowScore = Math.min(1.0, yellowFrac / 0.070);
-                                double wholeOrangeScore = Math.min(1.0, wholeOrange / 0.70);
-                                double greetScore = Math.min(1.0, greetWhite / 0.075);
-                                double labelScore = Math.min(1.0, labelWhite / 0.060);
-                                double score = geometryScore * 0.16
-                                        + redScore * 0.22
-                                        + yellowScore * 0.18
-                                        + wholeOrangeScore * 0.20
-                                        + greetScore * 0.14
-                                        + labelScore * 0.10;
-
-                                if (score > best) {
-                                    best = score;
-                                    bestCardX = cx;
-                                    bestCardY = cy;
-                                    bestCardW = cw;
-                                    bestCardH = ch;
-                                }
-                            }
-                        }
+                    if (score > best) {
+                        best = score;
+                        bestX = x;
+                        bestY = y;
+                        bestW = ww;
+                        bestH = hh;
                     }
                 }
             }
@@ -163,16 +123,19 @@ public final class VisionDetector {
 
         float scale = f.scale;
         f.recycle();
-        if (best < 0.72) return null;
+        if (best < 0.66) return null;
+
         float inv = 1f / scale;
-        // Click the center-right portion of the actual card, away from the small icon edge.
-        return new Match((bestCardX + bestCardW * 0.56f) * inv,
-                (bestCardY + bestCardH * 0.48f) * inv, best);
+        // Tap inside the orange card rather than on the small red icon edge.
+        return new Match(
+                (bestX + bestW * 3.10f) * inv,
+                (bestY + bestH * 0.82f) * inv,
+                best);
     }
 
     /**
-     * WeChat open-button fallback detector. It only searches the central popup area and
-     * requires a beige circular body, dark central glyph and warm red/orange surroundings.
+     * WeChat open-button fallback detector. It only searches the central popup area and requires
+     * a beige circular body, dark central glyph and warm red/orange surroundings.
      */
     public static Match detectOpenButton(Bitmap source) {
         Frame f = Frame.from(source, 480);
@@ -243,10 +206,14 @@ public final class VisionDetector {
                     double glyphScore = Math.min(1.0, innerDark / 0.10);
                     double circleScore = Math.min(1.0, Math.max(0, sideBeige - cornerBeige) / 0.62);
                     double warmScore = Math.min(1.0, expandedWarm / 0.34);
-                    double centerPenalty = Math.min(0.12, Math.abs(ccx - screenCx) / f.w * 0.35
-                            + Math.abs(ccy - screenCy) / f.h * 0.10);
-                    double score = bodyScore * 0.34 + glyphScore * 0.28
-                            + circleScore * 0.26 + warmScore * 0.12 - centerPenalty;
+                    double centerPenalty = Math.min(0.12,
+                            Math.abs(ccx - screenCx) / f.w * 0.35
+                                    + Math.abs(ccy - screenCy) / f.h * 0.10);
+                    double score = bodyScore * 0.34
+                            + glyphScore * 0.28
+                            + circleScore * 0.26
+                            + warmScore * 0.12
+                            - centerPenalty;
 
                     if (score > best) {
                         best = score;
@@ -290,8 +257,10 @@ public final class VisionDetector {
         int y2 = Math.max(y, Math.min(maxH, y + rh));
         if (x2 <= x || y2 <= y) return 0;
         int stride = w + 1;
-        int sum = ii[y2 * stride + x2] - ii[y * stride + x2]
-                - ii[y2 * stride + x] + ii[y * stride + x];
+        int sum = ii[y2 * stride + x2]
+                - ii[y * stride + x2]
+                - ii[y2 * stride + x]
+                + ii[y * stride + x];
         return sum / (double) ((x2 - x) * (y2 - y));
     }
 
@@ -306,7 +275,8 @@ public final class VisionDetector {
                     && Math.max(r, Math.max(g, b)) - Math.min(r, Math.min(g, b)) < 55;
             case 3: return r > 190 && g > 150 && g < 245 && b > 85 && b < 220
                     && r >= g - 3 && g > b + 8 && r > b + 25;
-            case 4: return r < 145 && g < 145 && b < 145 && Math.max(r, Math.max(g, b)) < 155;
+            case 4: return r < 145 && g < 145 && b < 145
+                    && Math.max(r, Math.max(g, b)) < 155;
             case 5: return r > 155 && g < 200 && b < 170 && r > b + 25;
             case 6: return r > 205 && g > 155 && b < 110 && r > b + 105 && g > b + 65;
             default: return false;
