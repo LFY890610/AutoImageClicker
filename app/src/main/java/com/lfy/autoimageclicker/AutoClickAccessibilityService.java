@@ -3,6 +3,7 @@ package com.lfy.autoimageclicker;
 import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.graphics.Path;
+import android.graphics.Rect;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
@@ -21,7 +22,10 @@ public class AutoClickAccessibilityService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        // Screen recognition is handled by CaptureService.
+        // Fast path: react to UI changes immediately instead of waiting for the next screenshot.
+        if (CaptureService.isRunning()) {
+            CaptureService.requestAccessibilityFastPath();
+        }
     }
 
     @Override
@@ -50,7 +54,21 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         return service.dispatchGesture(gesture, null, null);
     }
 
+    /** Click the lowest visible matching node. Useful for the newest visible WeChat red packet. */
+    public static boolean clickLatestTextIfPresent(String... terms) {
+        return clickBestTextNode(true, terms);
+    }
+
+    /** Click the matching node nearest to screen center. Useful for the open button. */
+    public static boolean clickCenterTextIfPresent(String... terms) {
+        return clickBestTextNode(false, terms);
+    }
+
     public static boolean clickTextIfPresent(String... terms) {
+        return clickBestTextNode(false, terms);
+    }
+
+    private static boolean clickBestTextNode(boolean preferBottom, String... terms) {
         AutoClickAccessibilityService service = instance.get();
         if (service == null) return false;
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
@@ -58,29 +76,57 @@ public class AutoClickAccessibilityService extends AccessibilityService {
 
         Deque<AccessibilityNodeInfo> queue = new ArrayDeque<>();
         queue.add(root);
+        AccessibilityNodeInfo best = null;
+        double bestScore = -Double.MAX_VALUE;
         int visited = 0;
-        while (!queue.isEmpty() && visited < 500) {
+        Rect rootBounds = new Rect();
+        root.getBoundsInScreen(rootBounds);
+        float cx = rootBounds.exactCenterX();
+        float cy = rootBounds.exactCenterY();
+        if (cx <= 0) cx = 540;
+        if (cy <= 0) cy = 960;
+
+        while (!queue.isEmpty() && visited < 900) {
             AccessibilityNodeInfo node = queue.removeFirst();
             visited++;
+            if (node == null) continue;
+
             CharSequence text = node.getText();
             CharSequence desc = node.getContentDescription();
-            if (matches(text, terms) || matches(desc, terms)) {
+            if (node.isVisibleToUser() && (matches(text, terms) || matches(desc, terms))) {
                 AccessibilityNodeInfo clickable = node;
                 int parents = 0;
-                while (clickable != null && !clickable.isClickable() && parents < 6) {
+                while (clickable != null && !clickable.isClickable() && parents < 7) {
                     clickable = clickable.getParent();
                     parents++;
                 }
-                if (clickable != null && clickable.isClickable()) {
-                    return clickable.performAction(AccessibilityNodeInfo.ACTION_CLICK);
+                if (clickable != null && clickable.isVisibleToUser()) {
+                    Rect r = new Rect();
+                    clickable.getBoundsInScreen(r);
+                    if (!r.isEmpty()) {
+                        double score;
+                        if (preferBottom) {
+                            score = r.bottom * 10.0 + r.centerY();
+                        } else {
+                            double dx = r.exactCenterX() - cx;
+                            double dy = r.exactCenterY() - cy;
+                            score = -(dx * dx + dy * dy);
+                        }
+                        if (score > bestScore) {
+                            bestScore = score;
+                            best = clickable;
+                        }
+                    }
                 }
             }
+
             for (int i = 0; i < node.getChildCount(); i++) {
                 AccessibilityNodeInfo child = node.getChild(i);
                 if (child != null) queue.addLast(child);
             }
         }
-        return false;
+
+        return best != null && best.performAction(AccessibilityNodeInfo.ACTION_CLICK);
     }
 
     private static boolean matches(CharSequence value, String... terms) {
