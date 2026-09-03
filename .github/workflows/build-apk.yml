@@ -5,6 +5,10 @@ on:
     branches: [ "main" ]
   workflow_dispatch:
 
+concurrency:
+  group: build-apk-latest
+  cancel-in-progress: true
+
 permissions:
   contents: write
 
@@ -50,4 +54,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag -y || true
-          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 最新版" --notes "Android 自动识别点击器自动构建版本。"
+          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 极速版" --notes "提高识别准确率与点击响应速度的自动构建版本。"
