@@ -45,7 +45,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView explain = new TextView(this);
-        explain.setText("后台收到明确包含“红包”的微信通知后，自动进入对应聊天；确认真正红包后点击1次，再识别中央“开/開”并快速点击2次。\n\n第一次使用请完成下面3项授权。");
+        explain.setText("后台红包通知 → 自动进入聊天 → 优先直接读取“微信红包”节点并点击1次 → 读取中央“开/開”并点击2次 → 领取完成后自动返回聊天。\n\n视觉识别不再持续运行，只在微信没有提供关键节点时短暂兜底。第一次使用请完成下面3项授权。");
         explain.setTextSize(16f);
         explain.setPadding(0, dp(16), 0, dp(14));
         root.addView(explain, new LinearLayout.LayoutParams(
@@ -69,12 +69,12 @@ public class MainActivity extends Activity {
         root.addView(accessibility, buttonParams());
 
         Button start = new Button(this);
-        start.setText("3. 启动后台全自动识别");
+        start.setText("3. 启动后台全自动领取");
         start.setOnClickListener(v -> startRecognition());
         root.addView(start, buttonParams());
 
         Button stop = new Button(this);
-        stop.setText("停止后台识别");
+        stop.setText("停止后台全自动");
         stop.setOnClickListener(v -> {
             Intent i = new Intent(this, CaptureService.class);
             i.setAction(CaptureService.ACTION_STOP);
@@ -91,7 +91,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView note = new TextView(this);
-        note.setText("使用方法：开启通知读取 → 开启无障碍 → 启动后台全自动识别 → 允许屏幕共享/录制。之后可以停留在桌面或其他应用。\n\n注意：为避免普通消息强行跳转，本版只对通知文本明确包含“红包/微信红包/恭喜发财”等特征的微信通知自动进入聊天。若微信关闭了通知内容预览，后台无法从通知中判断是否有红包。安全锁屏不会被本软件绕过。");
+        note.setText("使用方法：开启通知读取 → 开启无障碍 → 启动后台全自动领取 → 允许屏幕共享/录制。之后可以停留在桌面或其他应用。\n\n后台发现依赖微信系统通知中出现“红包/微信红包/恭喜发财”等特征。如果微信隐藏通知内容，Android本身不会把红包信息提供给本软件。屏幕安全锁不会被绕过。屏幕捕获仅作为无障碍节点缺失时的备用识别来源。");
         note.setTextSize(13.5f);
         note.setPadding(0, dp(20), 0, 0);
         root.addView(note, new LinearLayout.LayoutParams(
@@ -141,11 +141,11 @@ public class MainActivity extends Activity {
                     startService(service);
                 }
                 Toast.makeText(this,
-                        "后台全自动识别已启动，可以离开微信或停留在其他应用",
+                        "后台全自动领取已启动，可以离开微信",
                         Toast.LENGTH_LONG).show();
                 statusView.postDelayed(this::updateStatus, 500);
             } else {
-                Toast.makeText(this, "没有允许屏幕捕获，后台识别未启动", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "没有允许屏幕捕获，备用视觉识别无法启动", Toast.LENGTH_LONG).show();
             }
         }
     }
@@ -160,10 +160,10 @@ public class MainActivity extends Activity {
         String notify = WeChatNotificationListener.isNotificationAccessGranted(this)
                 ? "已开启" : "未开启";
         String click = AutoClickAccessibilityService.isConnected() ? "已开启" : "未开启";
-        String run = CaptureService.isRunning() ? "后台监测中" : "已停止";
+        String run = CaptureService.isRunning() ? "后台待命中" : "已停止";
         statusView.setText("通知读取权限：" + notify
                 + "\n无障碍权限：" + click
-                + "\n后台识别状态：" + run);
+                + "\n全自动状态：" + run);
     }
 
     private int dp(int v) {
