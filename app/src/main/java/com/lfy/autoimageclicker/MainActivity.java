@@ -38,43 +38,32 @@ public class MainActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("微信红包后台全自动版");
-        title.setTextSize(25f);
+        title.setText("微信红包前台极速高准确版");
+        title.setTextSize(24f);
         title.setGravity(Gravity.CENTER);
         root.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView explain = new TextView(this);
-        explain.setText("后台红包通知 → 自动进入聊天 → 优先直接读取“微信红包”节点并点击1次 → 读取中央“开/開”并点击2次 → 领取完成后自动返回聊天。\n\n视觉识别不再持续运行，只在微信没有提供关键节点时短暂兜底。第一次使用请完成下面3项授权。");
+        explain.setText("固定流程：严格识别真正红包 → 点击1次 → 识别中央“开/開” → 点击1次 → 领取完成后自动返回聊天。\n\n同一个红包完成后不会再次重复处理。重点只做准确率和速度。");
         explain.setTextSize(16f);
-        explain.setPadding(0, dp(16), 0, dp(14));
+        explain.setPadding(0, dp(18), 0, dp(18));
         root.addView(explain, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
-        Button notification = new Button(this);
-        notification.setText("1. 开启微信通知读取权限");
-        notification.setOnClickListener(v -> {
-            try {
-                startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
-            } catch (Throwable e) {
-                startActivity(new Intent("android.settings.ACTION_NOTIFICATION_LISTENER_SETTINGS"));
-            }
-        });
-        root.addView(notification, buttonParams());
-
         Button accessibility = new Button(this);
-        accessibility.setText("2. 开启无障碍自动点击权限");
+        accessibility.setText("1. 开启无障碍自动点击权限");
         accessibility.setOnClickListener(v ->
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)));
         root.addView(accessibility, buttonParams());
 
         Button start = new Button(this);
-        start.setText("3. 启动后台全自动领取");
+        start.setText("2. 开始极速识别");
         start.setOnClickListener(v -> startRecognition());
         root.addView(start, buttonParams());
 
         Button stop = new Button(this);
-        stop.setText("停止后台全自动");
+        stop.setText("停止识别");
         stop.setOnClickListener(v -> {
             Intent i = new Intent(this, CaptureService.class);
             i.setAction(CaptureService.ACTION_STOP);
@@ -86,14 +75,14 @@ public class MainActivity extends Activity {
 
         statusView = new TextView(this);
         statusView.setTextSize(16f);
-        statusView.setPadding(0, dp(20), 0, 0);
+        statusView.setPadding(0, dp(22), 0, 0);
         root.addView(statusView, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView note = new TextView(this);
-        note.setText("使用方法：开启通知读取 → 开启无障碍 → 启动后台全自动领取 → 允许屏幕共享/录制。之后可以停留在桌面或其他应用。\n\n后台发现依赖微信系统通知中出现“红包/微信红包/恭喜发财”等特征。如果微信隐藏通知内容，Android本身不会把红包信息提供给本软件。屏幕安全锁不会被绕过。屏幕捕获仅作为无障碍节点缺失时的备用识别来源。");
+        note.setText("使用方法：开启无障碍 → 点“开始极速识别” → 允许屏幕共享/录制 → 切回微信目标聊天界面。\n\n本版不再监听微信后台通知，也不会自动跳转聊天。第一步使用严格视觉结构识别避免把表情当红包；高置信度红包第一帧即可点击，普通置信度只多确认1帧。中央“开/開”只点击1次，随后自动返回。");
         note.setTextSize(13.5f);
-        note.setPadding(0, dp(20), 0, 0);
+        note.setPadding(0, dp(22), 0, 0);
         root.addView(note, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
@@ -104,16 +93,11 @@ public class MainActivity extends Activity {
     private LinearLayout.LayoutParams buttonParams() {
         LinearLayout.LayoutParams p = new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, dp(56));
-        p.setMargins(0, dp(7), 0, dp(7));
+        p.setMargins(0, dp(8), 0, dp(8));
         return p;
     }
 
     private void startRecognition() {
-        if (!WeChatNotificationListener.isNotificationAccessGranted(this)) {
-            Toast.makeText(this, "请先开启本软件的“通知使用权”", Toast.LENGTH_LONG).show();
-            startActivity(new Intent(Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS));
-            return;
-        }
         if (!AutoClickAccessibilityService.isConnected()) {
             Toast.makeText(this, "请先开启本软件的无障碍权限", Toast.LENGTH_LONG).show();
             startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
@@ -135,17 +119,12 @@ public class MainActivity extends Activity {
                 service.setAction(CaptureService.ACTION_START);
                 service.putExtra(CaptureService.EXTRA_RESULT_CODE, resultCode);
                 service.putExtra(CaptureService.EXTRA_RESULT_DATA, data);
-                if (Build.VERSION.SDK_INT >= 26) {
-                    startForegroundService(service);
-                } else {
-                    startService(service);
-                }
-                Toast.makeText(this,
-                        "后台全自动领取已启动，可以离开微信",
-                        Toast.LENGTH_LONG).show();
+                if (Build.VERSION.SDK_INT >= 26) startForegroundService(service);
+                else startService(service);
+                Toast.makeText(this, "极速识别已启动，请切回微信聊天界面", Toast.LENGTH_LONG).show();
                 statusView.postDelayed(this::updateStatus, 500);
             } else {
-                Toast.makeText(this, "没有允许屏幕捕获，备用视觉识别无法启动", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "没有允许屏幕捕获，识别未启动", Toast.LENGTH_LONG).show();
             }
         }
     }
@@ -157,13 +136,9 @@ public class MainActivity extends Activity {
     }
 
     private void updateStatus() {
-        String notify = WeChatNotificationListener.isNotificationAccessGranted(this)
-                ? "已开启" : "未开启";
         String click = AutoClickAccessibilityService.isConnected() ? "已开启" : "未开启";
-        String run = CaptureService.isRunning() ? "后台待命中" : "已停止";
-        statusView.setText("通知读取权限：" + notify
-                + "\n无障碍权限：" + click
-                + "\n全自动状态：" + run);
+        String run = CaptureService.isRunning() ? "正在极速识别" : "已停止";
+        statusView.setText("无障碍权限：" + click + "\n识别状态：" + run);
     }
 
     private int dp(int v) {
