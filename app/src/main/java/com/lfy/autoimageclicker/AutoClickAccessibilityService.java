@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.graphics.Path;
 import android.graphics.Rect;
+import android.os.SystemClock;
 import android.view.accessibility.AccessibilityEvent;
 import android.view.accessibility.AccessibilityNodeInfo;
 
@@ -13,6 +14,7 @@ import java.util.List;
 public class AutoClickAccessibilityService extends AccessibilityService {
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static volatile WeakReference<AutoClickAccessibilityService> instance = new WeakReference<>(null);
+    private static volatile long lastWeChatEventAt = 0L;
 
     @Override
     protected void onServiceConnected() {
@@ -22,10 +24,16 @@ public class AutoClickAccessibilityService extends AccessibilityService {
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
-        if (!CaptureService.isRunning() || event == null) return;
+        if (event == null) return;
         CharSequence pkg = event.getPackageName();
         if (pkg != null && WECHAT_PACKAGE.contentEquals(pkg)) {
-            CaptureService.requestAccessibilityFastPath();
+            // Record WeChat activity even before capture starts. Some red-packet popup windows
+            // temporarily expose no stable root package, so this recent-event marker is used as
+            // a safe context fallback instead of blocking a valid image-recognition click.
+            lastWeChatEventAt = SystemClock.uptimeMillis();
+            if (CaptureService.isRunning()) {
+                CaptureService.requestAccessibilityFastPath();
+            }
         }
     }
 
@@ -42,34 +50,65 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         return instance.get() != null;
     }
 
+    /**
+     * Returns true when the current root explicitly belongs to WeChat, or when WeChat emitted
+     * an accessibility event very recently. The latter fixes popup pages where root package
+     * reporting is temporarily null/unstable.
+     */
     public static boolean isWeChatForeground() {
         AutoClickAccessibilityService service = instance.get();
         if (service == null) return false;
-        AccessibilityNodeInfo root = service.getRootInActiveWindow();
-        if (root == null || root.getPackageName() == null) return false;
-        return WECHAT_PACKAGE.contentEquals(root.getPackageName());
+        try {
+            AccessibilityNodeInfo root = service.getRootInActiveWindow();
+            if (root != null && root.getPackageName() != null
+                    && WECHAT_PACKAGE.contentEquals(root.getPackageName())) {
+                return true;
+            }
+        } catch (Throwable ignored) {}
+        return SystemClock.uptimeMillis() - lastWeChatEventAt < 8000L;
     }
 
+    /** Execute exactly one tap at the supplied screen coordinate. */
     public static boolean clickAt(float x, float y) {
         AutoClickAccessibilityService service = instance.get();
-        if (service == null || !isWeChatForeground()) return false;
+        if (service == null) return false;
+
         Path path = new Path();
         path.moveTo(x, y);
         GestureDescription gesture = new GestureDescription.Builder()
-                .addStroke(new GestureDescription.StrokeDescription(path, 0, 1))
+                .addStroke(new GestureDescription.StrokeDescription(path, 0, 5))
                 .build();
         return service.dispatchGesture(gesture, null, null);
     }
 
     /**
-     * Fast red-packet path. Search the exact label first, then prefer the newest/lower
-     * matching bubble. The greeting text is used as a strong bonus when exposed by WeChat.
+     * Execute two rapid taps at exactly the same point. The second tap starts 55 ms after the
+     * first one so Android treats them as two distinct taps while keeping the total delay tiny.
      */
-    public static boolean clickWeChatRedPacket() {
+    public static boolean clickAtTwice(float x, float y) {
+        AutoClickAccessibilityService service = instance.get();
+        if (service == null) return false;
+
+        Path first = new Path();
+        first.moveTo(x, y);
+        Path second = new Path();
+        second.moveTo(x, y);
+
+        GestureDescription gesture = new GestureDescription.Builder()
+                .addStroke(new GestureDescription.StrokeDescription(first, 0, 5))
+                .addStroke(new GestureDescription.StrokeDescription(second, 55, 5))
+                .build();
+        return service.dispatchGesture(gesture, null, null);
+    }
+
+    /**
+     * First stage: click the newest matching WeChat red packet exactly once.
+     */
+    public static boolean clickWeChatRedPacketOnce() {
         AutoClickAccessibilityService service = instance.get();
         if (service == null) return false;
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
-        if (root == null || root.getPackageName() == null || !WECHAT_PACKAGE.contentEquals(root.getPackageName())) return false;
+        if (root == null) return false;
 
         List<AccessibilityNodeInfo> labels = root.findAccessibilityNodeInfosByText("微信红包");
         if (labels == null || labels.isEmpty()) return false;
@@ -85,6 +124,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
             candidate.getBoundsInScreen(r);
             if (r.isEmpty()) continue;
 
+            // Prefer the lowest/newest visible packet. Greeting text provides a strong bonus.
             double score = r.bottom * 20.0 + r.centerY();
             AccessibilityNodeInfo context = candidate;
             for (int i = 0; i < 3 && context != null; i++) {
@@ -99,15 +139,17 @@ public class AutoClickAccessibilityService extends AccessibilityService {
                 best = candidate;
             }
         }
-        return performClickOrCenter(best);
+        return performSingleClickOrCenter(best);
     }
 
-    /** Fast open-button path. Only accept an exposed 開/开 node near screen center. */
-    public static boolean clickWeChatOpenButton() {
+    /**
+     * Second stage: locate an exposed central 開/开 node and tap its center exactly twice.
+     */
+    public static boolean clickWeChatOpenButtonTwice() {
         AutoClickAccessibilityService service = instance.get();
         if (service == null) return false;
         AccessibilityNodeInfo root = service.getRootInActiveWindow();
-        if (root == null || root.getPackageName() == null || !WECHAT_PACKAGE.contentEquals(root.getPackageName())) return false;
+        if (root == null) return false;
 
         Rect rootRect = new Rect();
         root.getBoundsInScreen(rootRect);
@@ -135,7 +177,9 @@ public class AutoClickAccessibilityService extends AccessibilityService {
 
                 float dx = r.exactCenterX() - cx;
                 float dy = r.exactCenterY() - cy;
-                if (Math.abs(dx) > rootRect.width() * 0.30f || Math.abs(dy) > rootRect.height() * 0.32f) continue;
+                if (Math.abs(dx) > rootRect.width() * 0.32f
+                        || Math.abs(dy) > rootRect.height() * 0.34f) continue;
+
                 double score = -(dx * dx + dy * dy);
                 if (score > bestScore) {
                     bestScore = score;
@@ -143,7 +187,21 @@ public class AutoClickAccessibilityService extends AccessibilityService {
                 }
             }
         }
-        return performClickOrCenter(best);
+
+        if (best == null) return false;
+        Rect r = new Rect();
+        best.getBoundsInScreen(r);
+        if (r.isEmpty()) return false;
+        return clickAtTwice(r.exactCenterX(), r.exactCenterY());
+    }
+
+    // Compatibility wrappers used by older code paths.
+    public static boolean clickWeChatRedPacket() {
+        return clickWeChatRedPacketOnce();
+    }
+
+    public static boolean clickWeChatOpenButton() {
+        return clickWeChatOpenButtonTwice();
     }
 
     private static AccessibilityNodeInfo findClickableAncestor(AccessibilityNodeInfo node, int maxParents) {
@@ -155,7 +213,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         return null;
     }
 
-    private static boolean performClickOrCenter(AccessibilityNodeInfo node) {
+    private static boolean performSingleClickOrCenter(AccessibilityNodeInfo node) {
         if (node == null) return false;
         if (node.isClickable() && node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true;
         Rect r = new Rect();
