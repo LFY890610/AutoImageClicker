@@ -4,11 +4,10 @@
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:allowBackup="false"
-        android:label="微信红包后台全自动版"
+        android:label="微信红包前台极速高准确版"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
@@ -29,7 +28,7 @@
         <service
             android:name=".AutoClickAccessibilityService"
             android:exported="false"
-            android:label="微信红包后台全自动版"
+            android:label="微信红包前台极速高准确版"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
@@ -37,16 +36,6 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
-        </service>
-
-        <service
-            android:name=".WeChatNotificationListener"
-            android:exported="false"
-            android:label="微信红包后台通知监听"
-            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
-            <intent-filter>
-                <action android:name="android.service.notification.NotificationListenerService" />
-            </intent-filter>
         </service>
 
     </application>
