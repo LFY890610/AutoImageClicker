@@ -13,7 +13,8 @@ import java.util.List;
 
 public class AutoClickAccessibilityService extends AccessibilityService {
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
-    private static volatile WeakReference<AutoClickAccessibilityService> instance = new WeakReference<>(null);
+    private static volatile WeakReference<AutoClickAccessibilityService> instance =
+            new WeakReference<>(null);
     private static volatile long lastWeChatEventAt = 0L;
 
     @Override
@@ -27,11 +28,11 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         if (event == null) return;
         CharSequence pkg = event.getPackageName();
         if (pkg != null && WECHAT_PACKAGE.contentEquals(pkg)) {
-            // Record WeChat activity even before capture starts. Some red-packet popup windows
-            // temporarily expose no stable root package, so this recent-event marker is used as
-            // a safe context fallback instead of blocking a valid image-recognition click.
             lastWeChatEventAt = SystemClock.uptimeMillis();
             if (CaptureService.isRunning()) {
+                // Node recognition runs first. A short visual-fallback window is opened only
+                // around real WeChat UI changes, so the screen is not continuously scanned.
+                CaptureService.noteWeChatUiChanged();
                 CaptureService.requestAccessibilityFastPath();
             }
         }
@@ -50,11 +51,6 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         return instance.get() != null;
     }
 
-    /**
-     * Returns true when the current root explicitly belongs to WeChat, or when WeChat emitted
-     * an accessibility event very recently. The latter fixes popup pages where root package
-     * reporting is temporarily null/unstable.
-     */
     public static boolean isWeChatForeground() {
         AutoClickAccessibilityService service = instance.get();
         if (service == null) return false;
@@ -72,7 +68,6 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     public static boolean clickAt(float x, float y) {
         AutoClickAccessibilityService service = instance.get();
         if (service == null) return false;
-
         Path path = new Path();
         path.moveTo(x, y);
         GestureDescription gesture = new GestureDescription.Builder()
@@ -81,10 +76,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         return service.dispatchGesture(gesture, null, null);
     }
 
-    /**
-     * Execute two rapid taps at exactly the same point. The second tap starts 55 ms after the
-     * first one so Android treats them as two distinct taps while keeping the total delay tiny.
-     */
+    /** Execute exactly two rapid taps at the same point. */
     public static boolean clickAtTwice(float x, float y) {
         AutoClickAccessibilityService service = instance.get();
         if (service == null) return false;
@@ -101,13 +93,11 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         return service.dispatchGesture(gesture, null, null);
     }
 
-    /**
-     * First stage: click the newest matching WeChat red packet exactly once.
-     */
+    /** Stage 1: click the newest visible node containing “微信红包”, exactly once. */
     public static boolean clickWeChatRedPacketOnce() {
         AutoClickAccessibilityService service = instance.get();
         if (service == null) return false;
-        AccessibilityNodeInfo root = service.getRootInActiveWindow();
+        AccessibilityNodeInfo root = safeRoot(service);
         if (root == null) return false;
 
         List<AccessibilityNodeInfo> labels = root.findAccessibilityNodeInfosByText("微信红包");
@@ -124,11 +114,12 @@ public class AutoClickAccessibilityService extends AccessibilityService {
             candidate.getBoundsInScreen(r);
             if (r.isEmpty()) continue;
 
-            // Prefer the lowest/newest visible packet. Greeting text provides a strong bonus.
+            // Newest message is normally lowest. The exact greeting provides an extra bonus.
             double score = r.bottom * 20.0 + r.centerY();
             AccessibilityNodeInfo context = candidate;
             for (int i = 0; i < 3 && context != null; i++) {
-                if (subtreeContains(context, "恭喜发财，大吉大利") || subtreeContains(context, "恭喜发财")) {
+                if (subtreeContains(context, "恭喜发财，大吉大利")
+                        || subtreeContains(context, "恭喜发财")) {
                     score += 1_000_000.0;
                     break;
                 }
@@ -142,20 +133,90 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         return performSingleClickOrCenter(best);
     }
 
-    /**
-     * Second stage: locate an exposed central 開/开 node and tap its center exactly twice.
-     */
+    /** Stage 2: find a central exact “開/开” node and tap its center exactly twice. */
     public static boolean clickWeChatOpenButtonTwice() {
         AutoClickAccessibilityService service = instance.get();
         if (service == null) return false;
-        AccessibilityNodeInfo root = service.getRootInActiveWindow();
+        AccessibilityNodeInfo root = safeRoot(service);
         if (root == null) return false;
 
+        AccessibilityNodeInfo best = findBestOpenNode(root);
+        if (best == null) return false;
+        Rect r = new Rect();
+        best.getBoundsInScreen(r);
+        if (r.isEmpty()) return false;
+        return clickAtTwice(r.exactCenterX(), r.exactCenterY());
+    }
+
+    public static boolean hasWeChatOpenButton() {
+        AutoClickAccessibilityService service = instance.get();
+        if (service == null) return false;
+        AccessibilityNodeInfo root = safeRoot(service);
+        return root != null && findBestOpenNode(root) != null;
+    }
+
+    /**
+     * Stage 3: detect a successful/already-finished red-packet result using nodes only.
+     * This is intentionally checked only after the open-button taps, preventing chat-text matches
+     * from causing an unrelated automatic BACK action.
+     */
+    public static boolean isRedPacketResultVisible() {
+        AutoClickAccessibilityService service = instance.get();
+        if (service == null) return false;
+        AccessibilityNodeInfo root = safeRoot(service);
+        if (root == null) return false;
+
+        String[] terms = {
+                "红包详情",
+                "手慢了",
+                "红包派完了",
+                "已被领完",
+                "已领取",
+                "已存入零钱",
+                "查看领取详情"
+        };
+        for (String term : terms) {
+            if (hasVisibleText(root, term)) return true;
+        }
+        return false;
+    }
+
+    /** Leave the red-packet result/popup and return toward the chat page. */
+    public static boolean backOnce() {
+        AutoClickAccessibilityService service = instance.get();
+        return service != null && service.performGlobalAction(GLOBAL_ACTION_BACK);
+    }
+
+    // Compatibility wrappers used by older paths.
+    public static boolean clickWeChatRedPacket() {
+        return clickWeChatRedPacketOnce();
+    }
+
+    public static boolean clickWeChatOpenButton() {
+        return clickWeChatOpenButtonTwice();
+    }
+
+    private static AccessibilityNodeInfo safeRoot(AutoClickAccessibilityService service) {
+        try {
+            AccessibilityNodeInfo root = service.getRootInActiveWindow();
+            if (root == null) return null;
+            CharSequence pkg = root.getPackageName();
+            if (pkg != null && !WECHAT_PACKAGE.contentEquals(pkg)
+                    && SystemClock.uptimeMillis() - lastWeChatEventAt >= 8000L) {
+                return null;
+            }
+            return root;
+        } catch (Throwable ignored) {
+            return null;
+        }
+    }
+
+    private static AccessibilityNodeInfo findBestOpenNode(AccessibilityNodeInfo root) {
         Rect rootRect = new Rect();
         root.getBoundsInScreen(rootRect);
         float cx = rootRect.exactCenterX();
         float cy = rootRect.exactCenterY();
-        if (cx <= 0 || cy <= 0) return false;
+        if (cx <= 0 || cy <= 0) return null;
 
         AccessibilityNodeInfo best = null;
         double bestScore = -1e30;
@@ -187,24 +248,11 @@ public class AutoClickAccessibilityService extends AccessibilityService {
                 }
             }
         }
-
-        if (best == null) return false;
-        Rect r = new Rect();
-        best.getBoundsInScreen(r);
-        if (r.isEmpty()) return false;
-        return clickAtTwice(r.exactCenterX(), r.exactCenterY());
+        return best;
     }
 
-    // Compatibility wrappers used by older code paths.
-    public static boolean clickWeChatRedPacket() {
-        return clickWeChatRedPacketOnce();
-    }
-
-    public static boolean clickWeChatOpenButton() {
-        return clickWeChatOpenButtonTwice();
-    }
-
-    private static AccessibilityNodeInfo findClickableAncestor(AccessibilityNodeInfo node, int maxParents) {
+    private static AccessibilityNodeInfo findClickableAncestor(
+            AccessibilityNodeInfo node, int maxParents) {
         AccessibilityNodeInfo cur = node;
         for (int i = 0; cur != null && i <= maxParents; i++) {
             if (cur.isVisibleToUser() && cur.isClickable()) return cur;
@@ -222,11 +270,30 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         return clickAt(r.exactCenterX(), r.exactCenterY());
     }
 
+    private static boolean hasVisibleText(AccessibilityNodeInfo root, String term) {
+        try {
+            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(term);
+            if (nodes == null) return false;
+            for (AccessibilityNodeInfo node : nodes) {
+                if (node != null && node.isVisibleToUser()) {
+                    CharSequence t = node.getText();
+                    CharSequence d = node.getContentDescription();
+                    if ((t != null && t.toString().contains(term))
+                            || (d != null && d.toString().contains(term))) {
+                        return true;
+                    }
+                }
+            }
+        } catch (Throwable ignored) {}
+        return false;
+    }
+
     private static boolean subtreeContains(AccessibilityNodeInfo root, String needle) {
         if (root == null || needle == null) return false;
         CharSequence t = root.getText();
         CharSequence d = root.getContentDescription();
-        if ((t != null && t.toString().contains(needle)) || (d != null && d.toString().contains(needle))) return true;
+        if ((t != null && t.toString().contains(needle))
+                || (d != null && d.toString().contains(needle))) return true;
         int n = Math.min(root.getChildCount(), 20);
         for (int i = 0; i < n; i++) {
             AccessibilityNodeInfo child = root.getChild(i);
@@ -235,11 +302,13 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         return false;
     }
 
-    private static boolean subtreeContainsShallow(AccessibilityNodeInfo node, String needle, int depth) {
+    private static boolean subtreeContainsShallow(
+            AccessibilityNodeInfo node, String needle, int depth) {
         if (node == null) return false;
         CharSequence t = node.getText();
         CharSequence d = node.getContentDescription();
-        if ((t != null && t.toString().contains(needle)) || (d != null && d.toString().contains(needle))) return true;
+        if ((t != null && t.toString().contains(needle))
+                || (d != null && d.toString().contains(needle))) return true;
         if (depth <= 0) return false;
         int n = Math.min(node.getChildCount(), 12);
         for (int i = 0; i < n; i++) {
