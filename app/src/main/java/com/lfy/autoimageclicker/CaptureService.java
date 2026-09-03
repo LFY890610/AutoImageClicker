@@ -25,6 +25,7 @@ import android.util.DisplayMetrics;
 import android.view.WindowManager;
 import android.widget.Toast;
 
+import java.lang.ref.WeakReference;
 import java.nio.ByteBuffer;
 
 public class CaptureService extends Service {
@@ -36,6 +37,7 @@ public class CaptureService extends Service {
     private static final String CHANNEL_ID = "auto_click_capture";
     private static final int NOTIFICATION_ID = 88;
     private static volatile boolean running = false;
+    private static volatile WeakReference<CaptureService> instance = new WeakReference<>(null);
 
     private MediaProjection mediaProjection;
     private VirtualDisplay virtualDisplay;
@@ -46,19 +48,32 @@ public class CaptureService extends Service {
     private int screenWidth;
     private int screenHeight;
     private int densityDpi;
+    private int captureWidth;
+    private int captureHeight;
+    private int captureDensityDpi;
+    private float clickScaleX = 1f;
+    private float clickScaleY = 1f;
     private long lastAnalyzeTime = 0;
     private long lastClickTime = 0;
     private long stateSince = 0;
     private long cooldownUntil = 0;
+    private long lastFastPathTime = 0;
+    private boolean fastPathPending = false;
     private int state = 0; // 0 = wait red packet, 1 = wait open button
 
     public static boolean isRunning() {
         return running;
     }
 
+    public static void requestAccessibilityFastPath() {
+        CaptureService service = instance.get();
+        if (service != null && running) service.scheduleAccessibilityFastPath();
+    }
+
     @Override
     public void onCreate() {
         super.onCreate();
+        instance = new WeakReference<>(this);
         mainHandler = new Handler(Looper.getMainLooper());
         createNotificationChannel();
     }
@@ -111,7 +126,16 @@ public class CaptureService extends Service {
         screenHeight = metrics.heightPixels;
         densityDpi = metrics.densityDpi;
 
-        captureThread = new HandlerThread("ScreenCaptureWorker");
+        // Capture at a reduced resolution. This keeps the same aspect/layout while cutting
+        // the number of pixels that must be copied and analyzed by roughly 3-5x.
+        float captureScale = Math.min(1f, 540f / Math.max(1, screenWidth));
+        captureWidth = Math.max(1, Math.round(screenWidth * captureScale));
+        captureHeight = Math.max(1, Math.round(screenHeight * captureScale));
+        captureDensityDpi = Math.max(1, Math.round(densityDpi * captureScale));
+        clickScaleX = screenWidth / (float) captureWidth;
+        clickScaleY = screenHeight / (float) captureHeight;
+
+        captureThread = new HandlerThread("ScreenCaptureWorker", android.os.Process.THREAD_PRIORITY_DISPLAY);
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
 
@@ -127,12 +151,12 @@ public class CaptureService extends Service {
             }
         }, mainHandler);
 
-        imageReader = ImageReader.newInstance(screenWidth, screenHeight, PixelFormat.RGBA_8888, 2);
+        imageReader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 3);
         virtualDisplay = mediaProjection.createVirtualDisplay(
                 "AutoImageClickerDisplay",
-                screenWidth,
-                screenHeight,
-                densityDpi,
+                captureWidth,
+                captureHeight,
+                captureDensityDpi,
                 DisplayManager.VIRTUAL_DISPLAY_FLAG_AUTO_MIRROR,
                 imageReader.getSurface(),
                 null,
@@ -143,8 +167,54 @@ public class CaptureService extends Service {
         state = 0;
         stateSince = System.currentTimeMillis();
         cooldownUntil = 0;
+        lastAnalyzeTime = 0;
+        lastClickTime = 0;
         running = true;
-        showToast("自动识别已启动");
+        showToast("极速识别已启动");
+
+        // Try immediately in case the target is already visible when capture starts.
+        scheduleAccessibilityFastPath();
+    }
+
+    private void scheduleAccessibilityFastPath() {
+        Handler h = captureHandler;
+        if (h == null || fastPathPending) return;
+        fastPathPending = true;
+        h.post(() -> {
+            fastPathPending = false;
+            if (!running) return;
+            long now = System.currentTimeMillis();
+            if (now - lastFastPathTime < 12) return;
+            lastFastPathTime = now;
+            analyzeAccessibility(now);
+        });
+    }
+
+    private boolean analyzeAccessibility(long now) {
+        if (!AutoClickAccessibilityService.isConnected()) return false;
+
+        if (state == 1) {
+            if (now - stateSince > 2800) {
+                state = 0;
+                cooldownUntil = now + 180;
+                return false;
+            }
+            if (now - lastClickTime >= 45 && AutoClickAccessibilityService.clickCenterTextIfPresent("開", "开")) {
+                lastClickTime = now;
+                state = 0;
+                cooldownUntil = now + 220;
+                return true;
+            }
+        } else {
+            if (now >= cooldownUntil && now - lastClickTime >= 160
+                    && AutoClickAccessibilityService.clickLatestTextIfPresent("微信红包")) {
+                lastClickTime = now;
+                state = 1;
+                stateSince = now;
+                return true;
+            }
+        }
+        return false;
     }
 
     private void onImageAvailable(ImageReader reader) {
@@ -153,7 +223,12 @@ public class CaptureService extends Service {
             image = reader.acquireLatestImage();
             if (image == null || !running) return;
             long now = System.currentTimeMillis();
-            if (now - lastAnalyzeTime < 85) return;
+
+            // UI-tree matching is much faster and more exact than image matching.
+            if (analyzeAccessibility(now)) return;
+
+            long interval = state == 1 ? 18 : 32;
+            if (now - lastAnalyzeTime < interval) return;
             lastAnalyzeTime = now;
 
             Bitmap frame = imageToBitmap(image);
@@ -173,34 +248,27 @@ public class CaptureService extends Service {
         if (!AutoClickAccessibilityService.isConnected()) return;
 
         if (state == 1) {
-            if (now - stateSince > 4500) {
+            if (now - stateSince > 2800) {
                 state = 0;
-                cooldownUntil = now + 350;
-                return;
-            }
-
-            if (now - lastClickTime > 180 && AutoClickAccessibilityService.clickTextIfPresent("開", "开")) {
-                lastClickTime = now;
-                state = 0;
-                cooldownUntil = now + 800;
+                cooldownUntil = now + 180;
                 return;
             }
 
             VisionDetector.Match open = VisionDetector.detectOpenButton(frame);
-            if (open != null && now - lastClickTime > 180) {
-                if (AutoClickAccessibilityService.clickAt(open.x, open.y)) {
+            if (open != null && now - lastClickTime >= 45) {
+                if (AutoClickAccessibilityService.clickAt(open.x * clickScaleX, open.y * clickScaleY)) {
                     lastClickTime = now;
                     state = 0;
-                    cooldownUntil = now + 800;
+                    cooldownUntil = now + 220;
                 }
             }
             return;
         }
 
-        if (now < cooldownUntil || now - lastClickTime < 500) return;
+        if (now < cooldownUntil || now - lastClickTime < 160) return;
         VisionDetector.Match redPacket = VisionDetector.detectRedPacket(frame);
         if (redPacket != null) {
-            if (AutoClickAccessibilityService.clickAt(redPacket.x, redPacket.y)) {
+            if (AutoClickAccessibilityService.clickAt(redPacket.x * clickScaleX, redPacket.y * clickScaleY)) {
                 lastClickTime = now;
                 state = 1;
                 stateSince = now;
@@ -214,14 +282,14 @@ public class CaptureService extends Service {
         ByteBuffer buffer = planes[0].getBuffer();
         int pixelStride = planes[0].getPixelStride();
         int rowStride = planes[0].getRowStride();
-        int rowPadding = rowStride - pixelStride * screenWidth;
-        int bitmapWidth = screenWidth + Math.max(0, rowPadding / pixelStride);
+        int rowPadding = rowStride - pixelStride * captureWidth;
+        int bitmapWidth = captureWidth + Math.max(0, rowPadding / pixelStride);
 
-        Bitmap padded = Bitmap.createBitmap(bitmapWidth, screenHeight, Bitmap.Config.ARGB_8888);
+        Bitmap padded = Bitmap.createBitmap(bitmapWidth, captureHeight, Bitmap.Config.ARGB_8888);
         padded.copyPixelsFromBuffer(buffer);
-        if (bitmapWidth == screenWidth) return padded;
+        if (bitmapWidth == captureWidth) return padded;
 
-        Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, screenWidth, screenHeight);
+        Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, captureWidth, captureHeight);
         padded.recycle();
         return cropped;
     }
@@ -258,6 +326,7 @@ public class CaptureService extends Service {
     @Override
     public void onDestroy() {
         stopCapture();
+        instance = new WeakReference<>(null);
         super.onDestroy();
     }
 
@@ -286,7 +355,7 @@ public class CaptureService extends Service {
         return new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .setContentTitle("自动识别点击器正在运行")
-                .setContentText("正在检测红包和“开”按钮")
+                .setContentText("极速检测红包和“开”按钮")
                 .setContentIntent(contentIntent)
                 .setOngoing(true)
                 .addAction(new Notification.Action.Builder(null, "停止", stopIntent).build())
