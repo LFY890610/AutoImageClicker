@@ -36,9 +36,10 @@ public class CaptureService extends Service {
     private static final String CHANNEL_ID = "auto_click_capture";
     private static final int NOTIFICATION_ID = 88;
 
-    private static final int STATE_WAIT_PACKET = 0;
-    private static final int STATE_WAIT_OPEN = 1;
-    private static final int STATE_WAIT_RESULT = 2;
+    private static final int WAIT_PACKET = 0;
+    private static final int WAIT_OPEN = 1;
+    private static final int WAIT_RESULT = 2;
+    private static final int WAIT_CLEAR = 3;
 
     private static volatile boolean running = false;
     private static volatile WeakReference<CaptureService> instance = new WeakReference<>(null);
@@ -59,20 +60,21 @@ public class CaptureService extends Service {
     private float clickScaleX = 1f;
     private float clickScaleY = 1f;
 
-    private long lastAnalyzeTime = 0;
-    private long lastClickTime = 0;
-    private long stateSince = 0;
-    private long cooldownUntil = 0;
-    private long lastFastPathTime = 0;
-    private long visualFallbackUntil = 0;
-    private long notificationFlowUntil = 0;
+    private volatile int state = WAIT_PACKET;
+    private long stateSince = 0L;
+    private long lastAnalyzeTime = 0L;
+    private long lastClickTime = 0L;
+    private long lastFastPathTime = 0L;
     private boolean fastPathPending = false;
-    private volatile int state = STATE_WAIT_PACKET;
 
     private float pendingRedX = -1f;
     private float pendingRedY = -1f;
-    private long pendingRedTime = 0;
+    private long pendingRedTime = 0L;
     private int pendingRedCount = 0;
+
+    private float lastPacketX = -10000f;
+    private float lastPacketY = -10000f;
+    private int clearFrames = 0;
 
     public static boolean isRunning() {
         return running;
@@ -81,38 +83,6 @@ public class CaptureService extends Service {
     public static void requestAccessibilityFastPath() {
         CaptureService service = instance.get();
         if (service != null && running) service.scheduleAccessibilityFastPath();
-    }
-
-    /**
-     * Called on real WeChat UI changes. Visual recognition is opened only for a short period,
-     * instead of continuously scanning the screen while the phone is idle.
-     */
-    public static void noteWeChatUiChanged() {
-        CaptureService service = instance.get();
-        if (service == null || !running) return;
-        long now = System.currentTimeMillis();
-        if (service.state == STATE_WAIT_RESULT) return;
-        long duration = service.state == STATE_WAIT_OPEN ? 1500L : 800L;
-        service.visualFallbackUntil = Math.max(service.visualFallbackUntil, now + duration);
-    }
-
-    /** Arm a full red-packet cycle immediately before a matching WeChat notification is opened. */
-    public static boolean prepareForNotificationRedPacket() {
-        CaptureService service = instance.get();
-        if (service == null || !running) return false;
-        long now = System.currentTimeMillis();
-
-        // Do not interrupt a packet that is already being opened or finalized.
-        if (service.state != STATE_WAIT_PACKET && now - service.stateSince < 5000L) return false;
-
-        service.state = STATE_WAIT_PACKET;
-        service.stateSince = now;
-        service.cooldownUntil = 0;
-        service.notificationFlowUntil = now + 6000L;
-        service.visualFallbackUntil = Math.max(service.visualFallbackUntil, now + 4200L);
-        service.resetPendingRed();
-        service.scheduleAccessibilityFastPath();
-        return true;
     }
 
     @Override
@@ -126,19 +96,18 @@ public class CaptureService extends Service {
     @Override
     public int onStartCommand(Intent intent, int flags, int startId) {
         if (intent == null) return START_NOT_STICKY;
-        String action = intent.getAction();
-        if (ACTION_STOP.equals(action)) {
+        if (ACTION_STOP.equals(intent.getAction())) {
             stopCapture();
             stopSelf();
             return START_NOT_STICKY;
         }
 
-        if (ACTION_START.equals(action) && !running) {
+        if (ACTION_START.equals(intent.getAction()) && !running) {
             startAsForeground();
             int resultCode = intent.getIntExtra(EXTRA_RESULT_CODE, 0);
             Intent resultData = intent.getParcelableExtra(EXTRA_RESULT_DATA);
             if (resultData == null) {
-                showToast("屏幕捕获授权无效，请重新启动");
+                showToast("屏幕捕获授权无效，请重新启动识别");
                 stopCapture();
                 stopSelf();
                 return START_NOT_STICKY;
@@ -146,7 +115,7 @@ public class CaptureService extends Service {
             try {
                 startCapture(resultCode, resultData);
             } catch (Throwable t) {
-                showToast("启动失败：" + t.getClass().getSimpleName());
+                showToast("启动识别失败：" + t.getClass().getSimpleName());
                 stopCapture();
                 stopSelf();
             }
@@ -172,7 +141,7 @@ public class CaptureService extends Service {
         screenHeight = metrics.heightPixels;
         densityDpi = metrics.densityDpi;
 
-        // Screen capture stays ready only as a fallback. Nodes are always tried first.
+        // 480px width keeps the supplied WeChat packet features while allowing near-frame-rate scans.
         float captureScale = Math.min(1f, 480f / Math.max(1, screenWidth));
         captureWidth = Math.max(1, Math.round(screenWidth * captureScale));
         captureHeight = Math.max(1, Math.round(screenHeight * captureScale));
@@ -210,19 +179,19 @@ public class CaptureService extends Service {
                 null,
                 captureHandler
         );
-
         imageReader.setOnImageAvailableListener(this::onImageAvailable, captureHandler);
-        state = STATE_WAIT_PACKET;
+
+        state = WAIT_PACKET;
         stateSince = System.currentTimeMillis();
-        cooldownUntil = 0;
-        lastAnalyzeTime = 0;
-        lastClickTime = 0;
-        visualFallbackUntil = 0;
-        notificationFlowUntil = 0;
+        lastAnalyzeTime = 0L;
+        lastClickTime = 0L;
+        lastFastPathTime = 0L;
+        lastPacketX = -10000f;
+        lastPacketY = -10000f;
+        clearFrames = 0;
         resetPendingRed();
         running = true;
-        showToast("后台全自动已启动：节点优先，视觉仅兜底");
-        scheduleAccessibilityFastPath();
+        showToast("前台极速识别已启动：红包1次，開/开1次，完成后自动返回");
     }
 
     private void scheduleAccessibilityFastPath() {
@@ -242,66 +211,52 @@ public class CaptureService extends Service {
     private void scheduleResultChecks() {
         Handler h = captureHandler;
         if (h == null) return;
-        long[] delays = {120L, 220L, 360L, 520L, 760L, 1100L, 1600L, 2200L};
-        for (long delay : delays) {
-            h.postDelayed(this::scheduleAccessibilityFastPath, delay);
-        }
+        long[] delays = {80L, 140L, 220L, 340L, 500L, 700L, 950L};
+        for (long delay : delays) h.postDelayed(this::scheduleAccessibilityFastPath, delay);
     }
 
     private boolean analyzeAccessibility(long now) {
         if (!AutoClickAccessibilityService.isConnected()
                 || !AutoClickAccessibilityService.isWeChatForeground()) return false;
 
-        if (state == STATE_WAIT_RESULT) {
-            long elapsed = now - stateSince;
-            if (elapsed >= 120L && AutoClickAccessibilityService.isRedPacketResultVisible()) {
+        if (state == WAIT_OPEN) {
+            // Already-claimed/expired packets may show a result without an open button.
+            if (AutoClickAccessibilityService.isRedPacketResultVisible()) {
                 AutoClickAccessibilityService.backOnce();
-                finishCycle(now);
+                enterWaitClear(now);
                 return true;
             }
 
-            // Some WeChat builds do not expose result text. If the open button has disappeared,
-            // a delayed single BACK safely returns from the result/popup to the chat page.
-            if (elapsed >= 1800L && !AutoClickAccessibilityService.hasWeChatOpenButton()) {
-                AutoClickAccessibilityService.backOnce();
-                finishCycle(now);
-                return true;
-            }
-
-            // Never keep the state machine permanently stuck if a vendor build exposes neither.
-            if (elapsed >= 5000L) {
-                finishCycle(now);
-            }
-            return false;
-        }
-
-        if (state == STATE_WAIT_OPEN) {
-            if (now - stateSince > 3400L) {
-                finishCycle(now);
-                return false;
-            }
-            if (now - lastClickTime >= 10L
-                    && AutoClickAccessibilityService.clickWeChatOpenButtonTwice()) {
+            if (now - lastClickTime >= 8L
+                    && AutoClickAccessibilityService.clickWeChatOpenButtonOnce()) {
                 lastClickTime = now;
-                state = STATE_WAIT_RESULT;
+                state = WAIT_RESULT;
                 stateSince = now;
-                visualFallbackUntil = 0;
-                resetPendingRed();
                 scheduleResultChecks();
                 return true;
             }
+
+            if (now - stateSince > 2400L) {
+                AutoClickAccessibilityService.backOnce();
+                enterWaitClear(now);
+            }
             return false;
         }
 
-        // Stage 1. Exact “微信红包” node is immediate: no image frame and no second-frame delay.
-        if (now >= cooldownUntil && now - lastClickTime >= 70L
-                && AutoClickAccessibilityService.clickWeChatRedPacketOnce()) {
-            lastClickTime = now;
-            state = STATE_WAIT_OPEN;
-            stateSince = now;
-            visualFallbackUntil = Math.max(visualFallbackUntil, now + 3400L);
-            resetPendingRed();
-            return true;
+        if (state == WAIT_RESULT) {
+            long elapsed = now - stateSince;
+            if (elapsed >= 80L && AutoClickAccessibilityService.isRedPacketResultVisible()) {
+                AutoClickAccessibilityService.backOnce();
+                enterWaitClear(now);
+                return true;
+            }
+
+            // Fallback for WeChat builds that do not expose result text.
+            if (elapsed >= 700L) {
+                AutoClickAccessibilityService.backOnce();
+                enterWaitClear(now);
+                return true;
+            }
         }
         return false;
     }
@@ -314,15 +269,9 @@ public class CaptureService extends Service {
             long now = System.currentTimeMillis();
 
             if (!AutoClickAccessibilityService.isWeChatForeground()) return;
-
-            // Always give accessibility nodes the first opportunity on every actual UI change.
             if (analyzeAccessibility(now)) return;
 
-            // Result/exit is node-driven. Visual recognition is only a short-lived fallback for
-            // the packet card and open button.
-            if (state == STATE_WAIT_RESULT || now > visualFallbackUntil) return;
-
-            long interval = state == STATE_WAIT_OPEN ? 8L : 12L;
+            long interval = state == WAIT_RESULT ? 20L : 8L;
             if (now - lastAnalyzeTime < interval) return;
             lastAnalyzeTime = now;
 
@@ -343,51 +292,78 @@ public class CaptureService extends Service {
         if (!AutoClickAccessibilityService.isConnected()
                 || !AutoClickAccessibilityService.isWeChatForeground()) return;
 
-        if (state == STATE_WAIT_OPEN) {
-            resetPendingRed();
-            if (now - stateSince > 3400L) {
-                finishCycle(now);
+        if (state == WAIT_PACKET) {
+            VisionDetector.Match packet = VisionDetector.detectRedPacket(frame);
+            if (packet == null) {
+                resetPendingRed();
                 return;
             }
 
+            // Very strong matches click on the first frame. Borderline matches require one extra
+            // adjacent frame, which normally costs only a few tens of milliseconds.
+            boolean confirmed = packet.score >= 0.84 || confirmRedPacket(packet, now);
+            if (!confirmed || now - lastClickTime < 70L) return;
+
+            if (AutoClickAccessibilityService.clickAt(
+                    packet.x * clickScaleX, packet.y * clickScaleY)) {
+                lastClickTime = now;
+                lastPacketX = packet.x;
+                lastPacketY = packet.y;
+                state = WAIT_OPEN;
+                stateSince = now;
+                resetPendingRed();
+            }
+            return;
+        }
+
+        if (state == WAIT_OPEN) {
             VisionDetector.Match open = VisionDetector.detectOpenButton(frame);
-            if (open != null && now - lastClickTime >= 10L) {
-                if (AutoClickAccessibilityService.clickAtTwice(
+            if (open != null && now - lastClickTime >= 8L) {
+                if (AutoClickAccessibilityService.clickAt(
                         open.x * clickScaleX, open.y * clickScaleY)) {
                     lastClickTime = now;
-                    state = STATE_WAIT_RESULT;
+                    state = WAIT_RESULT;
                     stateSince = now;
-                    visualFallbackUntil = 0;
                     scheduleResultChecks();
                 }
             }
             return;
         }
 
-        if (state != STATE_WAIT_PACKET) return;
-        if (now < cooldownUntil || now - lastClickTime < 70L) {
-            resetPendingRed();
-            return;
-        }
+        if (state == WAIT_CLEAR) {
+            VisionDetector.Match packet = VisionDetector.detectRedPacket(frame);
+            if (packet == null) {
+                clearFrames++;
+                if (clearFrames >= 2) {
+                    state = WAIT_PACKET;
+                    stateSince = now;
+                    resetPendingRed();
+                }
+                return;
+            }
 
-        VisionDetector.Match redPacket = VisionDetector.detectRedPacket(frame);
-        if (redPacket == null) {
-            if (pendingRedCount > 0 && now - pendingRedTime > 90L) resetPendingRed();
-            return;
-        }
-
-        // Strict high-confidence layout may click on the first visual frame. Borderline matches
-        // still require two adjacent frames, preserving the anti-emoji protection.
-        boolean confirmed = redPacket.score >= 0.82 || confirmRedPacket(redPacket, now);
-        if (!confirmed) return;
-
-        if (AutoClickAccessibilityService.clickAt(
-                redPacket.x * clickScaleX, redPacket.y * clickScaleY)) {
-            lastClickTime = now;
-            state = STATE_WAIT_OPEN;
-            stateSince = now;
-            visualFallbackUntil = Math.max(visualFallbackUntil, now + 3400L);
-            resetPendingRed();
+            clearFrames = 0;
+            float dx = packet.x - lastPacketX;
+            float dy = packet.y - lastPacketY;
+            float newPacketDistance = Math.max(60f, captureWidth * 0.14f);
+            if (dx * dx + dy * dy > newPacketDistance * newPacketDistance) {
+                // A clearly different/new packet is allowed immediately.
+                state = WAIT_PACKET;
+                stateSince = now;
+                resetPendingRed();
+                if (packet.score >= 0.84) {
+                    if (AutoClickAccessibilityService.clickAt(
+                            packet.x * clickScaleX, packet.y * clickScaleY)) {
+                        lastClickTime = now;
+                        lastPacketX = packet.x;
+                        lastPacketY = packet.y;
+                        state = WAIT_OPEN;
+                        stateSince = now;
+                    }
+                } else {
+                    confirmRedPacket(packet, now);
+                }
+            }
         }
     }
 
@@ -419,24 +395,17 @@ public class CaptureService extends Service {
         return pendingRedCount >= 2;
     }
 
-    private void finishCycle(long now) {
-        state = STATE_WAIT_PACKET;
+    private void enterWaitClear(long now) {
+        state = WAIT_CLEAR;
         stateSince = now;
-        cooldownUntil = now + 260L;
-        notificationFlowUntil = 0;
-        visualFallbackUntil = 0;
+        clearFrames = 0;
         resetPendingRed();
-
-        Handler h = captureHandler;
-        if (h != null) {
-            h.postDelayed(this::scheduleAccessibilityFastPath, 260L);
-        }
     }
 
     private void resetPendingRed() {
         pendingRedX = -1f;
         pendingRedY = -1f;
-        pendingRedTime = 0;
+        pendingRedTime = 0L;
         pendingRedCount = 0;
     }
 
@@ -454,8 +423,7 @@ public class CaptureService extends Service {
         padded.copyPixelsFromBuffer(buffer);
         if (bitmapWidth == captureWidth) return padded;
 
-        Bitmap cropped = Bitmap.createBitmap(
-                padded, 0, 0, captureWidth, captureHeight);
+        Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, captureWidth, captureHeight);
         padded.recycle();
         return cropped;
     }
@@ -503,8 +471,8 @@ public class CaptureService extends Service {
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
             NotificationChannel channel = new NotificationChannel(
-                    CHANNEL_ID, "后台全自动", NotificationManager.IMPORTANCE_LOW);
-            channel.setDescription("微信红包后台自动处理运行状态");
+                    CHANNEL_ID, "自动识别", NotificationManager.IMPORTANCE_LOW);
+            channel.setDescription("微信红包前台极速识别运行状态");
             NotificationManager nm =
                     (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             nm.createNotificationChannel(channel);
@@ -525,8 +493,8 @@ public class CaptureService extends Service {
 
         return new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setContentTitle("微信红包后台全自动正在运行")
-                .setContentText("通知触发 → 节点极速领取 → 自动返回；视觉仅作兜底")
+                .setContentTitle("微信红包前台极速识别运行中")
+                .setContentText("严格识别红包1次 → 開/开1次 → 自动返回")
                 .setContentIntent(contentIntent)
                 .setOngoing(true)
                 .addAction(new Notification.Action.Builder(null, "停止", stopIntent).build())
