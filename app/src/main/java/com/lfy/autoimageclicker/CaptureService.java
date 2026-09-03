@@ -125,8 +125,8 @@ public class CaptureService extends Service {
         screenHeight = metrics.heightPixels;
         densityDpi = metrics.densityDpi;
 
-        // 480px-wide capture is enough for these two large visual targets and reduces
-        // pixel copying/analysis substantially on 1080p/1440p phones.
+        // 480 px is enough for the large red-packet card and central open button while keeping
+        // every-frame image analysis very light.
         float captureScale = Math.min(1f, 480f / Math.max(1, screenWidth));
         captureWidth = Math.max(1, Math.round(screenWidth * captureScale));
         captureHeight = Math.max(1, Math.round(screenHeight * captureScale));
@@ -169,7 +169,7 @@ public class CaptureService extends Service {
         lastAnalyzeTime = 0;
         lastClickTime = 0;
         running = true;
-        showToast("微信专用极速识别已启动");
+        showToast("微信极速点击已启动：红包1次，開按钮2次");
         scheduleAccessibilityFastPath();
     }
 
@@ -181,29 +181,36 @@ public class CaptureService extends Service {
             fastPathPending = false;
             if (!running) return;
             long now = System.currentTimeMillis();
-            if (now - lastFastPathTime < 5) return;
+            if (now - lastFastPathTime < 4) return;
             lastFastPathTime = now;
             analyzeAccessibility(now);
         });
     }
 
     private boolean analyzeAccessibility(long now) {
-        if (!AutoClickAccessibilityService.isConnected() || !AutoClickAccessibilityService.isWeChatForeground()) return false;
+        if (!AutoClickAccessibilityService.isConnected()
+                || !AutoClickAccessibilityService.isWeChatForeground()) return false;
 
         if (state == 1) {
-            if (now - stateSince > 2400) {
+            // Give the red-packet popup enough time to animate in, but return to stage 1 if it
+            // never appears. The open button itself is double-tapped once when found.
+            if (now - stateSince > 3000) {
                 state = 0;
-                cooldownUntil = now + 80;
+                cooldownUntil = now + 100;
                 return false;
             }
-            if (now - lastClickTime >= 12 && AutoClickAccessibilityService.clickWeChatOpenButton()) {
+            if (now - lastClickTime >= 10
+                    && AutoClickAccessibilityService.clickWeChatOpenButtonTwice()) {
                 lastClickTime = now;
                 state = 0;
-                cooldownUntil = now + 120;
+                cooldownUntil = now + 160;
                 return true;
             }
         } else {
-            if (now >= cooldownUntil && now - lastClickTime >= 80 && AutoClickAccessibilityService.clickWeChatRedPacket()) {
+            // Stage 1 is exactly one click. Once accepted, switch state immediately so the same
+            // packet cannot be clicked again during this cycle.
+            if (now >= cooldownUntil && now - lastClickTime >= 90
+                    && AutoClickAccessibilityService.clickWeChatRedPacketOnce()) {
                 lastClickTime = now;
                 state = 1;
                 stateSince = now;
@@ -220,15 +227,13 @@ public class CaptureService extends Service {
             if (image == null || !running) return;
             long now = System.currentTimeMillis();
 
-            // Do nothing outside WeChat. This is both safer and faster.
+            // WeChat context is confirmed either by the active root package or by a recent
+            // WeChat accessibility event. This avoids the old false-negative popup bug.
             if (!AutoClickAccessibilityService.isWeChatForeground()) return;
 
-            // Accessibility tree is the primary fast path.
             if (analyzeAccessibility(now)) return;
 
-            // A 60 Hz screen only produces a new frame about every 16.7 ms. These limits
-            // therefore avoid redundant work while still analyzing essentially every frame.
-            long interval = state == 1 ? 10 : 18;
+            long interval = state == 1 ? 8 : 14;
             if (now - lastAnalyzeTime < interval) return;
             lastAnalyzeTime = now;
 
@@ -246,30 +251,35 @@ public class CaptureService extends Service {
     }
 
     private void analyzeFrame(Bitmap frame, long now) {
-        if (!AutoClickAccessibilityService.isConnected() || !AutoClickAccessibilityService.isWeChatForeground()) return;
+        if (!AutoClickAccessibilityService.isConnected()
+                || !AutoClickAccessibilityService.isWeChatForeground()) return;
 
         if (state == 1) {
-            if (now - stateSince > 2400) {
+            if (now - stateSince > 3000) {
                 state = 0;
-                cooldownUntil = now + 80;
+                cooldownUntil = now + 100;
                 return;
             }
 
             VisionDetector.Match open = VisionDetector.detectOpenButton(frame);
-            if (open != null && now - lastClickTime >= 12) {
-                if (AutoClickAccessibilityService.clickAt(open.x * clickScaleX, open.y * clickScaleY)) {
+            if (open != null && now - lastClickTime >= 10) {
+                // Stage 2: exactly two rapid taps at the detected center.
+                if (AutoClickAccessibilityService.clickAtTwice(
+                        open.x * clickScaleX, open.y * clickScaleY)) {
                     lastClickTime = now;
                     state = 0;
-                    cooldownUntil = now + 120;
+                    cooldownUntil = now + 160;
                 }
             }
             return;
         }
 
-        if (now < cooldownUntil || now - lastClickTime < 80) return;
+        if (now < cooldownUntil || now - lastClickTime < 90) return;
         VisionDetector.Match redPacket = VisionDetector.detectRedPacket(frame);
         if (redPacket != null) {
-            if (AutoClickAccessibilityService.clickAt(redPacket.x * clickScaleX, redPacket.y * clickScaleY)) {
+            // Stage 1: exactly one tap at the detected packet.
+            if (AutoClickAccessibilityService.clickAt(
+                    redPacket.x * clickScaleX, redPacket.y * clickScaleY)) {
                 lastClickTime = now;
                 state = 1;
                 stateSince = now;
@@ -336,7 +346,8 @@ public class CaptureService extends Service {
 
     private void createNotificationChannel() {
         if (Build.VERSION.SDK_INT >= 26) {
-            NotificationChannel channel = new NotificationChannel(CHANNEL_ID, "自动识别", NotificationManager.IMPORTANCE_LOW);
+            NotificationChannel channel = new NotificationChannel(
+                    CHANNEL_ID, "自动识别", NotificationManager.IMPORTANCE_LOW);
             channel.setDescription("微信红包自动识别运行状态");
             NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             nm.createNotificationChannel(channel);
@@ -345,16 +356,20 @@ public class CaptureService extends Service {
 
     private Notification buildNotification() {
         Intent openApp = new Intent(this, MainActivity.class);
-        PendingIntent contentIntent = PendingIntent.getActivity(this, 0, openApp, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent contentIntent = PendingIntent.getActivity(
+                this, 0, openApp,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         Intent stop = new Intent(this, CaptureService.class);
         stop.setAction(ACTION_STOP);
-        PendingIntent stopIntent = PendingIntent.getService(this, 1, stop, PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
+        PendingIntent stopIntent = PendingIntent.getService(
+                this, 1, stop,
+                PendingIntent.FLAG_UPDATE_CURRENT | PendingIntent.FLAG_IMMUTABLE);
 
         return new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
                 .setContentTitle("微信专用极速点击器正在运行")
-                .setContentText("仅在微信中检测红包与“開/开”按钮")
+                .setContentText("红包点击1次；中央“開/开”按钮点击2次")
                 .setContentIntent(contentIntent)
                 .setOngoing(true)
                 .addAction(new Notification.Action.Builder(null, "停止", stopIntent).build())
@@ -362,6 +377,7 @@ public class CaptureService extends Service {
     }
 
     private void showToast(String text) {
-        mainHandler.post(() -> Toast.makeText(getApplicationContext(), text, Toast.LENGTH_LONG).show());
+        mainHandler.post(() -> Toast.makeText(
+                getApplicationContext(), text, Toast.LENGTH_LONG).show());
     }
 }
