@@ -60,6 +60,13 @@ public class CaptureService extends Service {
     private boolean fastPathPending = false;
     private int state = 0; // 0 = wait red packet, 1 = wait open button
 
+    // Image fallback for stage 1 must see the same packet in two consecutive frames.
+    // Accessibility-text matches remain immediate because "微信红包" is already highly specific.
+    private float pendingRedX = -1f;
+    private float pendingRedY = -1f;
+    private long pendingRedTime = 0;
+    private int pendingRedCount = 0;
+
     public static boolean isRunning() {
         return running;
     }
@@ -111,7 +118,8 @@ public class CaptureService extends Service {
     private void startAsForeground() {
         Notification notification = buildNotification();
         if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(NOTIFICATION_ID, notification, ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
+            startForeground(NOTIFICATION_ID, notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION);
         } else {
             startForeground(NOTIFICATION_ID, notification);
         }
@@ -125,8 +133,8 @@ public class CaptureService extends Service {
         screenHeight = metrics.heightPixels;
         densityDpi = metrics.densityDpi;
 
-        // 480 px is enough for the large red-packet card and central open button while keeping
-        // every-frame image analysis very light.
+        // 480 px remains fast enough for essentially every display frame while retaining the
+        // distinctive card/icon/text layout needed for strict anti-emoji recognition.
         float captureScale = Math.min(1f, 480f / Math.max(1, screenWidth));
         captureWidth = Math.max(1, Math.round(screenWidth * captureScale));
         captureHeight = Math.max(1, Math.round(screenHeight * captureScale));
@@ -134,11 +142,13 @@ public class CaptureService extends Service {
         clickScaleX = screenWidth / (float) captureWidth;
         clickScaleY = screenHeight / (float) captureHeight;
 
-        captureThread = new HandlerThread("ScreenCaptureWorker", android.os.Process.THREAD_PRIORITY_DISPLAY);
+        captureThread = new HandlerThread(
+                "ScreenCaptureWorker", android.os.Process.THREAD_PRIORITY_DISPLAY);
         captureThread.start();
         captureHandler = new Handler(captureThread.getLooper());
 
-        MediaProjectionManager manager = (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
+        MediaProjectionManager manager =
+                (MediaProjectionManager) getSystemService(MEDIA_PROJECTION_SERVICE);
         mediaProjection = manager.getMediaProjection(resultCode, resultData);
         if (mediaProjection == null) throw new IllegalStateException("MediaProjection unavailable");
         mediaProjection.registerCallback(new MediaProjection.Callback() {
@@ -150,7 +160,8 @@ public class CaptureService extends Service {
             }
         }, mainHandler);
 
-        imageReader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 2);
+        imageReader = ImageReader.newInstance(
+                captureWidth, captureHeight, PixelFormat.RGBA_8888, 2);
         virtualDisplay = mediaProjection.createVirtualDisplay(
                 "AutoImageClickerDisplay",
                 captureWidth,
@@ -168,8 +179,9 @@ public class CaptureService extends Service {
         cooldownUntil = 0;
         lastAnalyzeTime = 0;
         lastClickTime = 0;
+        resetPendingRed();
         running = true;
-        showToast("微信极速点击已启动：红包1次，開按钮2次");
+        showToast("严格红包识别已启动：红包1次，開按钮2次");
         scheduleAccessibilityFastPath();
     }
 
@@ -192,11 +204,10 @@ public class CaptureService extends Service {
                 || !AutoClickAccessibilityService.isWeChatForeground()) return false;
 
         if (state == 1) {
-            // Give the red-packet popup enough time to animate in, but return to stage 1 if it
-            // never appears. The open button itself is double-tapped once when found.
             if (now - stateSince > 3000) {
                 state = 0;
                 cooldownUntil = now + 100;
+                resetPendingRed();
                 return false;
             }
             if (now - lastClickTime >= 10
@@ -204,16 +215,17 @@ public class CaptureService extends Service {
                 lastClickTime = now;
                 state = 0;
                 cooldownUntil = now + 160;
+                resetPendingRed();
                 return true;
             }
         } else {
-            // Stage 1 is exactly one click. Once accepted, switch state immediately so the same
-            // packet cannot be clicked again during this cycle.
+            // Exact accessibility text is the preferred path: no image confirmation delay needed.
             if (now >= cooldownUntil && now - lastClickTime >= 90
                     && AutoClickAccessibilityService.clickWeChatRedPacketOnce()) {
                 lastClickTime = now;
                 state = 1;
                 stateSince = now;
+                resetPendingRed();
                 return true;
             }
         }
@@ -227,10 +239,7 @@ public class CaptureService extends Service {
             if (image == null || !running) return;
             long now = System.currentTimeMillis();
 
-            // WeChat context is confirmed either by the active root package or by a recent
-            // WeChat accessibility event. This avoids the old false-negative popup bug.
             if (!AutoClickAccessibilityService.isWeChatForeground()) return;
-
             if (analyzeAccessibility(now)) return;
 
             long interval = state == 1 ? 8 : 14;
@@ -255,6 +264,7 @@ public class CaptureService extends Service {
                 || !AutoClickAccessibilityService.isWeChatForeground()) return;
 
         if (state == 1) {
+            resetPendingRed();
             if (now - stateSince > 3000) {
                 state = 0;
                 cooldownUntil = now + 100;
@@ -263,7 +273,6 @@ public class CaptureService extends Service {
 
             VisionDetector.Match open = VisionDetector.detectOpenButton(frame);
             if (open != null && now - lastClickTime >= 10) {
-                // Stage 2: exactly two rapid taps at the detected center.
                 if (AutoClickAccessibilityService.clickAtTwice(
                         open.x * clickScaleX, open.y * clickScaleY)) {
                     lastClickTime = now;
@@ -274,17 +283,64 @@ public class CaptureService extends Service {
             return;
         }
 
-        if (now < cooldownUntil || now - lastClickTime < 90) return;
-        VisionDetector.Match redPacket = VisionDetector.detectRedPacket(frame);
-        if (redPacket != null) {
-            // Stage 1: exactly one tap at the detected packet.
-            if (AutoClickAccessibilityService.clickAt(
-                    redPacket.x * clickScaleX, redPacket.y * clickScaleY)) {
-                lastClickTime = now;
-                state = 1;
-                stateSince = now;
-            }
+        if (now < cooldownUntil || now - lastClickTime < 90) {
+            resetPendingRed();
+            return;
         }
+
+        VisionDetector.Match redPacket = VisionDetector.detectRedPacket(frame);
+        if (redPacket == null) {
+            // Do not keep an old candidate alive for long; two confirmations must be adjacent.
+            if (pendingRedCount > 0 && now - pendingRedTime > 90) resetPendingRed();
+            return;
+        }
+
+        if (!confirmRedPacket(redPacket, now)) return;
+
+        // Stage 1: exactly one tap, only after two matching image frames.
+        if (AutoClickAccessibilityService.clickAt(
+                redPacket.x * clickScaleX, redPacket.y * clickScaleY)) {
+            lastClickTime = now;
+            state = 1;
+            stateSince = now;
+            resetPendingRed();
+        }
+    }
+
+    private boolean confirmRedPacket(VisionDetector.Match match, long now) {
+        if (match == null) return false;
+        if (pendingRedCount <= 0 || now - pendingRedTime > 120) {
+            pendingRedX = match.x;
+            pendingRedY = match.y;
+            pendingRedTime = now;
+            pendingRedCount = 1;
+            return false;
+        }
+
+        float dx = match.x - pendingRedX;
+        float dy = match.y - pendingRedY;
+        float maxDistance = Math.max(18f, captureWidth * 0.055f);
+        if (dx * dx + dy * dy > maxDistance * maxDistance) {
+            // Different visual target: restart confirmation instead of clicking.
+            pendingRedX = match.x;
+            pendingRedY = match.y;
+            pendingRedTime = now;
+            pendingRedCount = 1;
+            return false;
+        }
+
+        pendingRedX = (pendingRedX + match.x) * 0.5f;
+        pendingRedY = (pendingRedY + match.y) * 0.5f;
+        pendingRedTime = now;
+        pendingRedCount++;
+        return pendingRedCount >= 2;
+    }
+
+    private void resetPendingRed() {
+        pendingRedX = -1f;
+        pendingRedY = -1f;
+        pendingRedTime = 0;
+        pendingRedCount = 0;
     }
 
     private Bitmap imageToBitmap(Image image) {
@@ -296,17 +352,20 @@ public class CaptureService extends Service {
         int rowPadding = rowStride - pixelStride * captureWidth;
         int bitmapWidth = captureWidth + Math.max(0, rowPadding / pixelStride);
 
-        Bitmap padded = Bitmap.createBitmap(bitmapWidth, captureHeight, Bitmap.Config.ARGB_8888);
+        Bitmap padded = Bitmap.createBitmap(
+                bitmapWidth, captureHeight, Bitmap.Config.ARGB_8888);
         padded.copyPixelsFromBuffer(buffer);
         if (bitmapWidth == captureWidth) return padded;
 
-        Bitmap cropped = Bitmap.createBitmap(padded, 0, 0, captureWidth, captureHeight);
+        Bitmap cropped = Bitmap.createBitmap(
+                padded, 0, 0, captureWidth, captureHeight);
         padded.recycle();
         return cropped;
     }
 
     private void stopCapture() {
         running = false;
+        resetPendingRed();
         releaseCaptureObjects(true);
         stopForeground(STOP_FOREGROUND_REMOVE);
     }
@@ -349,7 +408,8 @@ public class CaptureService extends Service {
             NotificationChannel channel = new NotificationChannel(
                     CHANNEL_ID, "自动识别", NotificationManager.IMPORTANCE_LOW);
             channel.setDescription("微信红包自动识别运行状态");
-            NotificationManager nm = (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
+            NotificationManager nm =
+                    (NotificationManager) getSystemService(NOTIFICATION_SERVICE);
             nm.createNotificationChannel(channel);
         }
     }
@@ -368,8 +428,8 @@ public class CaptureService extends Service {
 
         return new Notification.Builder(this, CHANNEL_ID)
                 .setSmallIcon(android.R.drawable.ic_menu_view)
-                .setContentTitle("微信专用极速点击器正在运行")
-                .setContentText("红包点击1次；中央“開/开”按钮点击2次")
+                .setContentTitle("微信严格识别极速点击器正在运行")
+                .setContentText("严格排除表情：红包1次；中央“開/开”按钮2次")
                 .setContentIntent(contentIntent)
                 .setOngoing(true)
                 .addAction(new Notification.Action.Builder(null, "停止", stopIntent).build())
