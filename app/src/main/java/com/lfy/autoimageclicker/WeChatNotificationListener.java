@@ -1,9 +1,12 @@
 package com.lfy.autoimageclicker;
 
+import android.app.ActivityOptions;
 import android.app.Notification;
 import android.app.PendingIntent;
 import android.content.ComponentName;
 import android.content.Context;
+import android.os.Build;
+import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.PowerManager;
@@ -25,24 +28,49 @@ public class WeChatNotificationListener extends NotificationListenerService {
         if (n == null || !looksLikeRedPacket(n)) return;
 
         long now = android.os.SystemClock.uptimeMillis();
-        if (now - lastOpenAt < 700L) return;
+        if (now - lastOpenAt < 650L) return;
+
+        // Do not interrupt another packet that is already being processed.
+        if (!CaptureService.prepareForNotificationRedPacket()) return;
         lastOpenAt = now;
 
         wakeScreenBriefly();
 
         PendingIntent pi = n.contentIntent;
         if (pi == null) return;
-        try {
-            pi.send();
-        } catch (PendingIntent.CanceledException ignored) {
-            return;
-        }
+        if (!sendNotificationIntent(pi)) return;
 
-        // The notification PendingIntent opens the exact conversation. Re-check several times
-        // during the short UI transition so the first visible red packet is handled immediately.
-        long[] delays = {60L, 130L, 240L, 420L, 700L, 1050L};
+        // Re-check nodes repeatedly while WeChat enters the exact conversation. Usually the first
+        // one or two checks are enough; image fallback remains armed only for a short period.
+        long[] delays = {35L, 75L, 130L, 210L, 320L, 480L, 700L, 980L, 1350L};
         for (long delay : delays) {
-            handler.postDelayed(CaptureService::requestAccessibilityFastPath, delay);
+            handler.postDelayed(() -> {
+                CaptureService.noteWeChatUiChanged();
+                CaptureService.requestAccessibilityFastPath();
+            }, delay);
+        }
+    }
+
+    private boolean sendNotificationIntent(PendingIntent pi) {
+        try {
+            if (Build.VERSION.SDK_INT >= 34) {
+                ActivityOptions options = ActivityOptions.makeBasic();
+                options.setPendingIntentBackgroundActivityStartMode(
+                        ActivityOptions.MODE_BACKGROUND_ACTIVITY_START_ALLOWED);
+                Bundle bundle = options.toBundle();
+                pi.send(this, 0, null, null, null, null, bundle);
+            } else {
+                pi.send();
+            }
+            return true;
+        } catch (Throwable first) {
+            try {
+                // Vendor ROM fallback.
+                pi.send();
+                return true;
+            } catch (Throwable ignored) {
+                return false;
+            }
         }
     }
 
@@ -60,9 +88,12 @@ public class WeChatNotificationListener extends NotificationListenerService {
                 for (CharSequence line : lines) append(all, line);
             }
         }
+
         String s = all.toString();
         String lower = s.toLowerCase(java.util.Locale.ROOT);
         return s.contains("微信红包")
+                || s.contains("[红包]")
+                || s.contains("【红包】")
                 || s.contains("红包")
                 || s.contains("恭喜发财")
                 || lower.contains("red packet");
@@ -82,8 +113,7 @@ public class WeChatNotificationListener extends NotificationListenerService {
                             | PowerManager.ON_AFTER_RELEASE,
                     "AutoImageClicker:RedPacketWake");
             wl.acquire(3500L);
-        } catch (Throwable ignored) {
-        }
+        } catch (Throwable ignored) {}
     }
 
     public static boolean isNotificationAccessGranted(Context context) {
