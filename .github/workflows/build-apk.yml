@@ -54,4 +54,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag -y || true
-          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 新红包时间监控版" --notes "改为以用户点击‘从现在开始监控新红包’为时间起点。进入聊天、切换群聊或滚动历史消息时，当前已经存在的红包只建立历史基线，不执行点击；只有监控开始以后通过微信无障碍内容变化新出现的红包才进入领取流程。监控期间收到明确红包通知时，会仅授权对应新红包处理。红包仍只点击1次，开/開只点击1次并自动返回。继续保持无视觉、无录屏，并把空闲保底检查降为500ms以进一步降低耗电。"
+          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker ColorOS多窗口新红包监控版" --notes "针对实机诊断中 com.coloros.assistantscreen 抢占活动无障碍窗口导致微信点击全部被安全校验拦截的问题，重写核心无障碍服务。新核心启用多窗口枚举，在 ColorOS 侧边栏/悬浮助手覆盖时仍从全部交互窗口中定位真实 com.tencent.mm/可信分身窗口。监控逻辑只处理用户点击开始之后的新红包：进入聊天、切群、滚动时只建立历史基线；新红包通过内容变化 + 可见红包快照变化确认后才点击。明确红包通知可作为新红包信号。继续保持无视觉、无录屏，红包1次、开/開1次、完成后自动返回。"
