@@ -18,7 +18,7 @@ public class WeChatNotificationListener extends NotificationListenerService {
 
     @Override
     public void onNotificationPosted(StatusBarNotification sbn) {
-        if (sbn == null || !AutoClickAccessibilityService.isAutomationEnabled(this)) return;
+        if (sbn == null || !ReliableRedPacketAccessibilityService.isAutomationEnabled(this)) return;
         Notification n = sbn.getNotification();
         if (n == null) return;
 
@@ -38,9 +38,7 @@ public class WeChatNotificationListener extends NotificationListenerService {
                 || text.contains("【红包】");
         if (!likelyWeChat) return;
 
-        // Only notifications posted while monitoring is enabled can arm a new red packet.
-        // This lets accessibility ignore all historical packets that were already on screen.
-        AutoClickAccessibilityService.noteRedPacketNotification(this, pkg);
+        ReliableRedPacketAccessibilityService.noteRedPacketNotification(this, pkg);
 
         long now = android.os.SystemClock.uptimeMillis();
         if (now - lastOpenAt < 700L) return;
@@ -50,10 +48,10 @@ public class WeChatNotificationListener extends NotificationListenerService {
         if (pi == null) return;
         if (!sendPendingIntent(pi)) return;
 
-        long[] delays = {30L, 70L, 120L, 200L, 320L, 500L, 800L, 1200L};
+        long[] delays = {40L, 90L, 160L, 260L, 420L, 700L, 1100L, 1700L};
         android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
         for (long delay : delays) {
-            h.postDelayed(AutoClickAccessibilityService::requestImmediateCheck, delay);
+            h.postDelayed(ReliableRedPacketAccessibilityService::requestImmediateCheck, delay);
         }
     }
 
