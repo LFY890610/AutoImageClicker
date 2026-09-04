@@ -30,14 +30,14 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView title = new TextView(this);
-        title.setText("微信红包新消息监控版");
+        title.setText("微信红包新红包监控版");
         title.setTextSize(23f);
         title.setGravity(Gravity.CENTER);
         root.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView explain = new TextView(this);
-        explain.setText("只处理你点“开始监控”以后新出现的红包。\n\n进入微信聊天、切换群聊或滚动聊天时，当前屏幕已经存在的红包只建立历史基线，不点击。之后无障碍事件中新增加的红包才会立即处理。\n\n系统通知如果在监控开始后明确包含红包，会把对应微信/分身的新红包标记为本次新消息。仍然完全无视觉、无录屏。");
+        explain.setText("本版仍然完全无视觉、无录屏。\n\n核心已改为多窗口模式：即使 ColorOS 侧边栏/悬浮助手抢占当前活动窗口，也会从全部无障碍窗口中找到真正的微信/微信分身。\n\n点击开始监控以后，进入聊天时只登记当前已有红包为历史基线；之后新出现的红包才会自动点击、开红包并返回。");
         explain.setTextSize(15.5f);
         explain.setPadding(0, dp(16), 0, dp(14));
         root.addView(explain, new LinearLayout.LayoutParams(
@@ -58,26 +58,25 @@ public class MainActivity extends Activity {
         Button start = new Button(this);
         start.setText("3. 从现在开始监控新红包");
         start.setOnClickListener(v -> {
-            if (!AutoClickAccessibilityService.isConnected()) {
+            if (!ReliableRedPacketAccessibilityService.isConnected()) {
                 Toast.makeText(this, "请先开启本软件的无障碍权限", Toast.LENGTH_LONG).show();
                 startActivity(new Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS));
                 return;
             }
-            AutoClickAccessibilityService.setAutomationEnabled(this, true);
-            Toast.makeText(this,
-                    "监控已从现在开始。之后进入聊天时，已有红包只做基线，不会领取旧红包。",
-                    Toast.LENGTH_LONG).show();
+            ReliableRedPacketAccessibilityService.setAutomationEnabled(this, true);
+            Toast.makeText(this, "监控已从现在开始；以前的红包不会补领", Toast.LENGTH_LONG).show();
             updateAll();
         });
         root.addView(start, buttonParams());
 
         Button pairClone = new Button(this);
-        pairClone.setText("将最近打开的应用设为微信分身");
+        pairClone.setText("将最近识别到的微信应用设为分身");
         pairClone.setOnClickListener(v -> {
-            if (AutoClickAccessibilityService.trustLastSeenAsClone(this)) {
-                Toast.makeText(this, "已把最近应用设为可信微信分身", Toast.LENGTH_LONG).show();
+            if (ReliableRedPacketAccessibilityService.trustLastSeenAsClone(this)) {
+                Toast.makeText(this, "已设置可信微信分身", Toast.LENGTH_LONG).show();
+                ReliableRedPacketAccessibilityService.requestImmediateCheck();
             } else {
-                Toast.makeText(this, "还没有记录到可设置的微信分身候选", Toast.LENGTH_LONG).show();
+                Toast.makeText(this, "尚未记录到可设置的微信/分身包名", Toast.LENGTH_LONG).show();
             }
             updateAll();
         });
@@ -86,16 +85,16 @@ public class MainActivity extends Activity {
         Button refresh = new Button(this);
         refresh.setText("刷新诊断结果");
         refresh.setOnClickListener(v -> {
-            AutoClickAccessibilityService.requestImmediateCheck();
-            diagnosticView.postDelayed(this::updateAll, 250L);
+            ReliableRedPacketAccessibilityService.requestImmediateCheck();
+            diagnosticView.postDelayed(this::updateAll, 300L);
         });
         root.addView(refresh, buttonParams());
 
         Button stop = new Button(this);
         stop.setText("停止监控");
         stop.setOnClickListener(v -> {
-            AutoClickAccessibilityService.setAutomationEnabled(this, false);
-            Toast.makeText(this, "已停止监控", Toast.LENGTH_SHORT).show();
+            ReliableRedPacketAccessibilityService.setAutomationEnabled(this, false);
+            Toast.makeText(this, "已停止", Toast.LENGTH_SHORT).show();
             updateAll();
         });
         root.addView(stop, buttonParams());
@@ -120,7 +119,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView note = new TextView(this);
-        note.setText("正确测试方法：先进入软件点“从现在开始监控新红包”，然后进入微信目标群。此时群里原来就有的红包不会被点击，只会被记为历史基线。保持在群聊中，再让别人新发一个红包，新出现的红包才应该触发自动点击和领取。\n\n切换群聊或向上滚动查看历史消息时也不会补领旧红包。若使用微信分身且未识别，先进入分身再返回本软件，将最近应用设为微信分身。");
+        note.setText("正确测试：先点‘从现在开始监控新红包’，再进入目标微信群。群里原来已经存在的红包只会登记为历史基线，不会点击。保持群聊在前台，再让别人新发一个红包。\n\n诊断里的‘微信窗口状态’如果显示‘ColorOS覆盖层下已找到真实微信窗口’，说明多窗口修复已经生效。若收到明确红包通知，本版也会把它作为新红包信号使用。安全锁屏不会被绕过。");
         note.setTextSize(13.5f);
         root.addView(note, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
@@ -143,15 +142,15 @@ public class MainActivity extends Activity {
     }
 
     private void updateAll() {
-        String access = AutoClickAccessibilityService.isConnected() ? "已开启" : "未开启";
+        String access = ReliableRedPacketAccessibilityService.isConnected() ? "已开启" : "未开启";
         String notify = WeChatNotificationListener.isNotificationAccessGranted(this)
                 ? "已开启" : "未开启";
-        String run = AutoClickAccessibilityService.isAutomationEnabled(this)
+        String run = ReliableRedPacketAccessibilityService.isAutomationEnabled(this)
                 ? "正在监控启动后的新红包" : "已停止";
         statusView.setText("通知读取：" + notify
                 + "\n无障碍权限：" + access
                 + "\n监控状态：" + run);
-        diagnosticView.setText(AutoClickAccessibilityService.getDiagnostics(this));
+        diagnosticView.setText(ReliableRedPacketAccessibilityService.getDiagnostics(this));
     }
 
     private int dp(int v) {
