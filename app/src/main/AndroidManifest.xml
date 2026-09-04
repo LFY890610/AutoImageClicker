@@ -1,13 +1,9 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
 
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
-    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PROJECTION" />
-    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
-
     <application
         android:allowBackup="false"
-        android:label="微信红包前台极速高准确版"
+        android:label="微信红包纯无障碍低功耗版"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
@@ -21,14 +17,9 @@
         </activity>
 
         <service
-            android:name=".CaptureService"
-            android:exported="false"
-            android:foregroundServiceType="mediaProjection" />
-
-        <service
             android:name=".AutoClickAccessibilityService"
-            android:exported="false"
-            android:label="微信红包前台极速高准确版"
+            android:exported="true"
+            android:label="微信红包纯无障碍低功耗版"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
