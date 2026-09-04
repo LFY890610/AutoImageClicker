@@ -3,7 +3,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="微信红包无障碍可靠极速版"
+        android:label="微信红包新红包监控版"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
@@ -17,9 +17,9 @@
         </activity>
 
         <service
-            android:name=".AutoClickAccessibilityService"
+            android:name=".ReliableRedPacketAccessibilityService"
             android:exported="true"
-            android:label="微信红包无障碍可靠极速版"
+            android:label="微信红包多窗口无障碍服务"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
