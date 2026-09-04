@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <string name="app_name">微信红包纯无障碍事件极速版</string>
-    <string name="accessibility_desc">通过微信或系统微信分身的无障碍事件和节点识别红包、开按钮并自动点击，不进行屏幕截图或视觉识别。</string>
+    <string name="app_name">微信红包无障碍可靠极速版</string>
+    <string name="accessibility_desc">通过微信或微信分身的无障碍事件与低频节点保底识别红包和开按钮并自动点击，不进行屏幕截图或视觉识别。</string>
 </resources>
