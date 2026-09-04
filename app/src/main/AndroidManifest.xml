@@ -3,7 +3,7 @@
 
     <application
         android:allowBackup="false"
-        android:label="微信红包纯无障碍事件极速版"
+        android:label="微信红包无障碍可靠极速版"
         android:supportsRtl="true"
         android:theme="@style/AppTheme">
 
@@ -19,7 +19,7 @@
         <service
             android:name=".AutoClickAccessibilityService"
             android:exported="true"
-            android:label="微信红包纯无障碍事件极速版"
+            android:label="微信红包无障碍可靠极速版"
             android:permission="android.permission.BIND_ACCESSIBILITY_SERVICE">
             <intent-filter>
                 <action android:name="android.accessibilityservice.AccessibilityService" />
@@ -27,6 +27,16 @@
             <meta-data
                 android:name="android.accessibilityservice"
                 android:resource="@xml/accessibility_service_config" />
+        </service>
+
+        <service
+            android:name=".WeChatNotificationListener"
+            android:exported="true"
+            android:label="微信红包通知触发"
+            android:permission="android.permission.BIND_NOTIFICATION_LISTENER_SERVICE">
+            <intent-filter>
+                <action android:name="android.service.notification.NotificationListenerService" />
+            </intent-filter>
         </service>
 
     </application>
