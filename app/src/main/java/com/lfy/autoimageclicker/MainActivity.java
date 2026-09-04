@@ -25,14 +25,14 @@ public class MainActivity extends Activity {
         root.setPadding(pad, pad, pad, pad);
 
         TextView title = new TextView(this);
-        title.setText("微信红包纯无障碍低功耗版");
+        title.setText("微信红包纯无障碍事件极速版");
         title.setTextSize(24f);
         title.setGravity(Gravity.CENTER);
         root.addView(title, new LinearLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView explain = new TextView(this);
-        explain.setText("本版已经完全删除视觉识别和屏幕录制。\n\n流程：微信无障碍节点发现“微信红包” → 点击1次 → 查找“开/開”或中央可点击控件 → 点击1次 → 领取完成后自动返回聊天。\n\n平时不截图、不扫描屏幕，只在微信界面发生变化时检查节点，重点降低耗电并提高响应速度。");
+        explain.setText("完全无视觉、无录屏。主微信和系统微信分身都按事件直达处理。\n\n流程：微信节点发生变化 → 事件节点直接查“微信红包”并立即点1次 → 红包弹窗事件直接查“开/開”或中央控件并点1次 → 领取结果出现后立即返回聊天。\n\n只有事件信息不足时才做少量整窗口兜底查询。");
         explain.setTextSize(16f);
         explain.setPadding(0, dp(18), 0, dp(18));
         root.addView(explain, new LinearLayout.LayoutParams(
@@ -45,7 +45,7 @@ public class MainActivity extends Activity {
         root.addView(accessibility, buttonParams());
 
         Button start = new Button(this);
-        start.setText("2. 开始纯无障碍自动领取");
+        start.setText("2. 开始事件极速自动领取");
         start.setOnClickListener(v -> {
             if (!AutoClickAccessibilityService.isConnected()) {
                 Toast.makeText(this, "请先开启本软件的无障碍权限", Toast.LENGTH_LONG).show();
@@ -53,7 +53,7 @@ public class MainActivity extends Activity {
                 return;
             }
             AutoClickAccessibilityService.setAutomationEnabled(this, true);
-            Toast.makeText(this, "已启动，请切回微信聊天界面", Toast.LENGTH_LONG).show();
+            Toast.makeText(this, "已启动，可切回主微信或微信分身聊天界面", Toast.LENGTH_LONG).show();
             updateStatus();
         });
         root.addView(start, buttonParams());
@@ -74,7 +74,7 @@ public class MainActivity extends Activity {
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT));
 
         TextView note = new TextView(this);
-        note.setText("使用方法：开启无障碍 → 点“开始纯无障碍自动领取” → 切回微信目标聊天界面。\n\n本版不再申请屏幕共享/录制权限，也没有持续前台截图服务。若某个微信版本没有把“微信红包”或“开/開”相关控件暴露给 Android 无障碍系统，对应步骤就无法靠本版识别。");
+        note.setText("使用方法：开启无障碍 → 点“开始事件极速自动领取” → 切回主微信或微信分身的目标聊天。\n\n本版不使用屏幕共享、录制或视觉识别。系统级微信分身通常可直接兼容；如果某个第三方分身把微信完全重新打包并隐藏无障碍节点，则需要针对该分身包单独适配。锁屏且存在安全解锁时不能绕过系统锁屏自动领取。");
         note.setTextSize(13.5f);
         note.setPadding(0, dp(22), 0, 0);
         root.addView(note, new LinearLayout.LayoutParams(
@@ -100,7 +100,7 @@ public class MainActivity extends Activity {
     private void updateStatus() {
         String access = AutoClickAccessibilityService.isConnected() ? "已开启" : "未开启";
         String run = AutoClickAccessibilityService.isAutomationEnabled(this)
-                ? "正在等待微信红包" : "已停止";
+                ? "事件极速模式正在等待红包" : "已停止";
         statusView.setText("无障碍权限：" + access + "\n自动领取状态：" + run);
     }
 
