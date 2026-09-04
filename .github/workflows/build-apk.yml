@@ -54,4 +54,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag -y || true
-          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 红包节点适配修正版" --notes "依据实机诊断结果适配当前微信：系统已经能读取到含‘红包’节点，但没有‘微信红包’精确节点。新版把单独‘红包’短节点作为有效红包入口，并只使用最近的消息卡片父容器，不再一路上爬到整个聊天列表，避免被其他旧红包的‘已领取’状态误伤。系统UI事件不再覆盖最近微信/分身包名。继续保持无视觉、无录屏，并新增有效红包候选数和最近筛选结果诊断。"
+          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 新红包时间监控版" --notes "改为以用户点击‘从现在开始监控新红包’为时间起点。进入聊天、切换群聊或滚动历史消息时，当前已经存在的红包只建立历史基线，不执行点击；只有监控开始以后通过微信无障碍内容变化新出现的红包才进入领取流程。监控期间收到明确红包通知时，会仅授权对应新红包处理。红包仍只点击1次，开/開只点击1次并自动返回。继续保持无视觉、无录屏，并把空闲保底检查降为500ms以进一步降低耗电。"
