@@ -54,4 +54,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag -y || true
-          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 无障碍安全修正版" --notes "修复软件界面自行乱点击：无障碍服务现在硬性排除本软件包名，取消仅凭‘微信红包’文字把任意应用认作微信分身的逻辑，并在每一次点击、手势和返回动作前再次确认当前窗口必须是主微信或已通过微信包/类名身份确认的分身。继续保持无视觉、无录屏、事件优先 + 220ms低频保底。"
+          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 无障碍诊断修正版" --notes "继续保持无视觉、无录屏。修复微信分身身份识别：明确红包通知会自动学习对应分身包名，也可在进入分身后返回软件，一键把最近应用设为可信微信分身。红包节点识别从仅匹配‘微信红包’扩展到微信内包含‘红包/领取红包’的结构化节点，同时保留本软件界面硬隔离和每次动作前微信身份校验。新增可见诊断：记录最近包名/类名、微信身份判断、根节点是否可读、红包节点数、精确微信红包节点数、开/開节点数和最后动作，用于确认当前微信版本是否把红包暴露给 Android 无障碍。"
