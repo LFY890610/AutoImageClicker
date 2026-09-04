@@ -54,4 +54,4 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh release delete latest --cleanup-tag -y || true
-          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 节点优先极速修正版" --notes "第一阶段改为无障碍直接读取微信内置‘微信红包’节点并立即点击1次，不再等待截图；只有节点缺失时才启用严格视觉兜底。第二阶段对開/开采用四级单击路径：精确文字节点、中央可点击控件、视觉圆形按钮、已验证红包弹窗中心兜底，任一路径成功后立即停止后续点击，确保只打开1次。领取完成后自动返回，并继续抑制同一红包重复处理。"
+          gh release create latest AutoImageClicker.apk --target "$GITHUB_SHA" --title "AutoImageClicker 纯无障碍低功耗极速版" --notes "彻底删除 MediaProjection、屏幕录制、高频截图、CaptureService 和 VisionDetector，不再进行任何视觉识别。程序仅监听微信窗口/内容/滚动无障碍事件：发现内置‘微信红包’节点后立即点击1次，红包弹窗优先点击精确‘開/开’节点，其次查找中央可点击控件，最后仅在已确认点击红包后使用一次弹窗中心无障碍手势兜底。领取完成后自动返回聊天，并抑制同一个红包重复处理。"
