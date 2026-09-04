@@ -38,9 +38,9 @@ public class WeChatNotificationListener extends NotificationListenerService {
                 || text.contains("【红包】");
         if (!likelyWeChat) return;
 
-        // An explicit red-packet notification is a strong, low-risk signal for system/vendor
-        // WeChat clones whose package name was changed. Remember it so accessibility can act there.
-        AutoClickAccessibilityService.trustPackageFromRedPacketNotification(this, pkg);
+        // Only notifications posted while monitoring is enabled can arm a new red packet.
+        // This lets accessibility ignore all historical packets that were already on screen.
+        AutoClickAccessibilityService.noteRedPacketNotification(this, pkg);
 
         long now = android.os.SystemClock.uptimeMillis();
         if (now - lastOpenAt < 700L) return;
