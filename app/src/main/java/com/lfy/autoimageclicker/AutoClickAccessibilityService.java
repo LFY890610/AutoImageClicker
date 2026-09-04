@@ -4,6 +4,7 @@ import android.accessibilityservice.AccessibilityService;
 import android.accessibilityservice.GestureDescription;
 import android.content.Context;
 import android.content.Intent;
+import android.content.SharedPreferences;
 import android.graphics.Path;
 import android.graphics.Rect;
 import android.os.Handler;
@@ -21,6 +22,16 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     private static final String WECHAT_PACKAGE = "com.tencent.mm";
     private static final String PREFS = "red_packet_automation";
     private static final String KEY_ENABLED = "enabled";
+    private static final String KEY_TRUSTED_CLONE = "trusted_clone_package";
+    private static final String KEY_LAST_SEEN_PACKAGE = "last_seen_package";
+    private static final String KEY_LAST_SEEN_CLASS = "last_seen_class";
+    private static final String KEY_LAST_IDENTITY = "last_identity";
+    private static final String KEY_LAST_ROOT = "last_root";
+    private static final String KEY_LAST_PACKET_COUNT = "last_packet_count";
+    private static final String KEY_LAST_EXACT_PACKET_COUNT = "last_exact_packet_count";
+    private static final String KEY_LAST_OPEN_COUNT = "last_open_count";
+    private static final String KEY_LAST_ACTION = "last_action";
+    private static final String KEY_LAST_DIAG_TIME = "last_diag_time";
 
     private static final int WAIT_PACKET = 0;
     private static final int WAIT_OPEN = 1;
@@ -47,7 +58,6 @@ public class AutoClickAccessibilityService extends AccessibilityService {
 
     private int state = WAIT_PACKET;
     private long stateSince = 0L;
-    private long lastActionAt = 0L;
     private long lastPacketAt = 0L;
     private Rect lastPacketRect = null;
     private String activeWeChatPackage = "";
@@ -59,6 +69,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         instance = new WeakReference<>(this);
         activeWeChatPackage = "";
         resetState();
+        writeAction("无障碍服务已连接");
         restartHeartbeat();
     }
 
@@ -68,17 +79,19 @@ public class AutoClickAccessibilityService extends AccessibilityService {
 
         String pkg = event.getPackageName() == null ? "" : event.getPackageName().toString();
         String cls = event.getClassName() == null ? "" : event.getClassName().toString();
+        if (pkg.equals(getPackageName())) return;
 
-        // Absolute safety rule: our own UI must never be treated as WeChat or a clone.
-        if (isSelfPackage(pkg)) return;
-        if (!isWeChatIdentity(pkg, cls)) return;
+        saveLastSeen(pkg, cls);
+
+        boolean accepted = isAcceptedIdentity(pkg, cls);
+        writeIdentity(accepted ? "已识别为微信/可信分身" : "未识别为微信/分身");
+        if (!accepted) return;
 
         if (!pkg.isEmpty()) activeWeChatPackage = pkg;
-
         long now = SystemClock.uptimeMillis();
+
         AccessibilityNodeInfo source = null;
         try { source = event.getSource(); } catch (Throwable ignored) {}
-
         if (source != null && processScope(source, now)) return;
         processCurrentUi();
     }
@@ -99,13 +112,11 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     }
 
     public static boolean isAutomationEnabled(Context context) {
-        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .getBoolean(KEY_ENABLED, false);
+        return prefs(context).getBoolean(KEY_ENABLED, false);
     }
 
     public static void setAutomationEnabled(Context context, boolean enabled) {
-        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
-                .edit().putBoolean(KEY_ENABLED, enabled).apply();
+        prefs(context).edit().putBoolean(KEY_ENABLED, enabled).apply();
         AutoClickAccessibilityService service = instance.get();
         if (service != null) service.onAutomationFlagChanged(enabled);
     }
@@ -117,50 +128,109 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         }
     }
 
+    public static String getLastSeenPackage(Context context) {
+        return prefs(context).getString(KEY_LAST_SEEN_PACKAGE, "");
+    }
+
+    public static String getTrustedClonePackage(Context context) {
+        return prefs(context).getString(KEY_TRUSTED_CLONE, "");
+    }
+
+    public static boolean trustLastSeenAsClone(Context context) {
+        String pkg = getLastSeenPackage(context);
+        if (pkg == null || pkg.isEmpty() || pkg.equals(context.getPackageName())) return false;
+        prefs(context).edit().putString(KEY_TRUSTED_CLONE, pkg).apply();
+        AutoClickAccessibilityService service = instance.get();
+        if (service != null) {
+            service.activeWeChatPackage = pkg;
+            service.writeIdentity("已手动设为可信微信分身");
+            service.handler.post(service::processCurrentUi);
+        }
+        return true;
+    }
+
+    public static void trustPackageFromRedPacketNotification(Context context, String pkg) {
+        if (pkg == null || pkg.isEmpty() || pkg.equals(context.getPackageName())) return;
+        String p = pkg.toLowerCase(Locale.ROOT);
+        if (p.startsWith("android") || p.startsWith("com.android.systemui")) return;
+        prefs(context).edit().putString(KEY_TRUSTED_CLONE, pkg).apply();
+    }
+
+    public static String getDiagnostics(Context context) {
+        SharedPreferences p = prefs(context);
+        String seenPkg = p.getString(KEY_LAST_SEEN_PACKAGE, "未记录");
+        String seenCls = p.getString(KEY_LAST_SEEN_CLASS, "未记录");
+        String identity = p.getString(KEY_LAST_IDENTITY, "未检测");
+        String root = p.getString(KEY_LAST_ROOT, "未检测");
+        int packetCount = p.getInt(KEY_LAST_PACKET_COUNT, -1);
+        int exactCount = p.getInt(KEY_LAST_EXACT_PACKET_COUNT, -1);
+        int openCount = p.getInt(KEY_LAST_OPEN_COUNT, -1);
+        String action = p.getString(KEY_LAST_ACTION, "暂无动作");
+        String clone = p.getString(KEY_TRUSTED_CLONE, "未设置");
+        long time = p.getLong(KEY_LAST_DIAG_TIME, 0L);
+        String age;
+        if (time <= 0L) age = "无";
+        else age = Math.max(0L, (System.currentTimeMillis() - time) / 1000L) + "秒前";
+        return "最近应用包名：" + seenPkg
+                + "\n最近类名：" + seenCls
+                + "\n身份判断：" + identity
+                + "\n可信分身包名：" + clone
+                + "\n当前微信根节点：" + root
+                + "\n含‘红包’节点数：" + packetCount
+                + "\n含‘微信红包’节点数：" + exactCount
+                + "\n‘开/開’节点数：" + openCount
+                + "\n最后动作：" + action
+                + "\n诊断更新时间：" + age;
+    }
+
+    private static SharedPreferences prefs(Context context) {
+        return context.getSharedPreferences(PREFS, Context.MODE_PRIVATE);
+    }
+
     private void onAutomationFlagChanged(boolean enabled) {
         handler.removeCallbacksAndMessages(null);
         sequence++;
         resetState();
         if (!enabled) {
             activeWeChatPackage = "";
+            writeAction("自动领取已停止");
             return;
         }
+        writeAction("自动领取已启动，等待微信红包");
         handler.post(this::processCurrentUi);
         restartHeartbeat();
     }
 
     private void restartHeartbeat() {
         handler.removeCallbacks(heartbeat);
-        if (isAutomationEnabled(this)) handler.postDelayed(heartbeat, 120L);
+        if (isAutomationEnabled(this)) handler.postDelayed(heartbeat, 100L);
     }
 
     private void resetState() {
         state = WAIT_PACKET;
         stateSince = SystemClock.uptimeMillis();
-        lastActionAt = 0L;
     }
 
-    private boolean isSelfPackage(String pkg) {
-        return pkg != null && pkg.equals(getPackageName());
+    private boolean isAcceptedIdentity(String pkg, String cls) {
+        if (pkg == null || pkg.isEmpty() || pkg.equals(getPackageName())) return false;
+        if (isMainWeChatIdentity(pkg, cls)) return true;
+        String trusted = getTrustedClonePackage(this);
+        return !trusted.isEmpty() && trusted.equals(pkg);
     }
 
-    private static boolean isWeChatIdentity(String pkg, String cls) {
+    private static boolean isMainWeChatIdentity(String pkg, String cls) {
         String p = pkg == null ? "" : pkg.toLowerCase(Locale.ROOT);
         String c = cls == null ? "" : cls;
-
-        // Main WeChat and most system dual-app implementations keep the WeChat package identity.
-        if (WECHAT_PACKAGE.equals(p)
+        return WECHAT_PACKAGE.equals(p)
                 || p.startsWith(WECHAT_PACKAGE + ".")
-                || p.contains("tencent.mm")) return true;
-
-        // Some clones repackage the APK but keep original WeChat activity/view class names.
-        return c.startsWith("com.tencent.mm.");
+                || p.contains("tencent.mm")
+                || c.startsWith("com.tencent.mm.");
     }
 
     private boolean processScope(AccessibilityNodeInfo scope, long now) {
         if (scope == null || !canActOnCurrentWindow()) return false;
 
-        if (state == WAIT_CLEAR && now - stateSince >= 100L) {
+        if (state == WAIT_CLEAR && now - stateSince >= 120L) {
             state = WAIT_PACKET;
             stateSince = now;
         }
@@ -176,19 +246,19 @@ public class AutoClickAccessibilityService extends AccessibilityService {
 
         if (state == WAIT_OPEN) {
             if (subtreeContainsAny(scope, FINISHED_TERMS, 5)) {
-                backOnce();
+                if (backOnce()) writeAction("检测到红包结果，已返回聊天");
                 enterWaitClear(now);
                 return true;
             }
-
             if (clickExactOpenOnce(scope)) {
+                writeAction("已点击‘开/開’1次");
                 enterWaitResult(now);
                 return true;
             }
-
             AccessibilityNodeInfo root = safeRoot();
             Rect rootRect = bounds(root);
-            if (rootRect != null && clickCentralPopupActionOnce(scope, rootRect, 180)) {
+            if (rootRect != null && clickCentralPopupActionOnce(scope, rootRect, 220)) {
+                writeAction("已点击红包弹窗中央控件1次");
                 enterWaitResult(now);
                 return true;
             }
@@ -196,7 +266,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         }
 
         if (state == WAIT_RESULT && subtreeContainsAny(scope, FINISHED_TERMS, 5)) {
-            backOnce();
+            if (backOnce()) writeAction("领取结果已出现，已返回聊天");
             enterWaitClear(now);
             return true;
         }
@@ -206,19 +276,24 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     private void processCurrentUi() {
         if (!isAutomationEnabled(this)) return;
         AccessibilityNodeInfo root = safeRoot();
-        if (root == null) return;
-        long now = SystemClock.uptimeMillis();
+        if (root == null) {
+            writeRootStatus("未获得可信微信根节点");
+            return;
+        }
 
+        updateNodeDiagnostics(root);
+        long now = SystemClock.uptimeMillis();
         if (processScope(root, now)) return;
 
         if (state == WAIT_OPEN) {
             long elapsed = now - stateSince;
-            if (elapsed >= 130L && elapsed < 360L && clickExpectedOpenCenterOnce(root)) {
+            if (elapsed >= 120L && elapsed < 360L && clickExpectedOpenCenterOnce(root)) {
+                writeAction("未读到开按钮文字，已对红包弹窗中心点击1次");
                 enterWaitResult(now);
                 return;
             }
             if (elapsed > 1700L) {
-                backOnce();
+                if (backOnce()) writeAction("未找到开按钮，已退出红包弹窗");
                 enterWaitClear(now);
             }
             return;
@@ -227,32 +302,31 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         if (state == WAIT_RESULT) {
             long elapsed = now - stateSince;
             if (isRedPacketResultVisible(root)) {
-                backOnce();
+                if (backOnce()) writeAction("领取完成，已返回聊天");
                 enterWaitClear(now);
                 return;
             }
-            if (elapsed >= 850L) {
-                backOnce();
+            if (elapsed >= 900L) {
+                if (backOnce()) writeAction("领取后自动返回聊天");
                 enterWaitClear(now);
             }
             return;
         }
 
-        if (state == WAIT_CLEAR && now - stateSince >= 120L) {
+        if (state == WAIT_CLEAR && now - stateSince >= 140L) {
             state = WAIT_PACKET;
             stateSince = now;
         }
     }
 
     private void onPacketClicked(PacketCandidate packet, long now) {
-        lastActionAt = now;
         lastPacketAt = now;
         lastPacketRect = new Rect(packet.rect);
         state = WAIT_OPEN;
         stateSince = now;
+        writeAction("已点击红包1次，等待开按钮");
         int token = ++sequence;
-
-        long[] delays = {20L, 45L, 80L, 130L, 210L, 340L, 560L, 900L, 1500L};
+        long[] delays = {15L, 35L, 65L, 100L, 150L, 230L, 360L, 560L, 900L, 1500L};
         for (long d : delays) {
             handler.postDelayed(() -> {
                 if (token == sequence && state == WAIT_OPEN) processCurrentUi();
@@ -261,11 +335,10 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     }
 
     private void enterWaitResult(long now) {
-        lastActionAt = now;
         state = WAIT_RESULT;
         stateSince = now;
         int token = ++sequence;
-        long[] delays = {45L, 90L, 160L, 280L, 480L, 760L, 900L};
+        long[] delays = {40L, 80L, 140L, 240L, 400L, 650L, 920L};
         for (long d : delays) {
             handler.postDelayed(() -> {
                 if (token == sequence && state == WAIT_RESULT) processCurrentUi();
@@ -274,7 +347,6 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     }
 
     private void enterWaitClear(long now) {
-        lastActionAt = now;
         state = WAIT_CLEAR;
         stateSince = now;
         sequence++;
@@ -284,21 +356,18 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         try {
             AccessibilityNodeInfo root = getRootInActiveWindow();
             if (root == null) return null;
-
             String pkg = root.getPackageName() == null ? "" : root.getPackageName().toString();
             String cls = root.getClassName() == null ? "" : root.getClassName().toString();
-
-            // Never scan or act on our own UI, Settings, launcher, lock screen, or arbitrary apps.
-            if (isSelfPackage(pkg)) return null;
-
-            if (isWeChatIdentity(pkg, cls)) {
-                if (!pkg.isEmpty()) activeWeChatPackage = pkg;
+            if (pkg.equals(getPackageName())) return null;
+            if (isAcceptedIdentity(pkg, cls)) {
+                activeWeChatPackage = pkg;
+                writeRootStatus("可读取，包名=" + pkg);
                 return root;
             }
-
-            // A remembered clone package is accepted only if it was learned earlier from a genuine
-            // WeChat package/class identity. Text such as “微信红包” alone can never teach a package.
-            if (!activeWeChatPackage.isEmpty() && activeWeChatPackage.equals(pkg)) return root;
+            if (!activeWeChatPackage.isEmpty() && activeWeChatPackage.equals(pkg)) {
+                writeRootStatus("可读取，已确认分身包名=" + pkg);
+                return root;
+            }
         } catch (Throwable ignored) {}
         return null;
     }
@@ -309,9 +378,9 @@ public class AutoClickAccessibilityService extends AccessibilityService {
             if (root == null) return false;
             String pkg = root.getPackageName() == null ? "" : root.getPackageName().toString();
             String cls = root.getClassName() == null ? "" : root.getClassName().toString();
-            if (isSelfPackage(pkg)) return false;
-            if (isWeChatIdentity(pkg, cls)) return true;
-            return !activeWeChatPackage.isEmpty() && activeWeChatPackage.equals(pkg);
+            if (pkg.equals(getPackageName())) return false;
+            return isAcceptedIdentity(pkg, cls)
+                    || (!activeWeChatPackage.isEmpty() && activeWeChatPackage.equals(pkg));
         } catch (Throwable ignored) {
             return false;
         }
@@ -321,10 +390,9 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         if (scope == null) return null;
         List<AccessibilityNodeInfo> labels = new ArrayList<>();
         try {
-            List<AccessibilityNodeInfo> direct = scope.findAccessibilityNodeInfosByText("微信红包");
+            List<AccessibilityNodeInfo> direct = scope.findAccessibilityNodeInfosByText("红包");
             if (direct != null) labels.addAll(direct);
         } catch (Throwable ignored) {}
-
         if (labels.isEmpty()) collectPacketLabels(scope, labels, 0, new int[]{0});
         if (labels.isEmpty()) return null;
 
@@ -332,27 +400,34 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         double bestScore = -1e30;
         for (AccessibilityNodeInfo label : labels) {
             if (label == null || !label.isVisibleToUser()) continue;
-            if (!containsPacketLabel(label)) continue;
+            String text = nodeText(label);
+            if (!text.contains("红包")) continue;
+            if (containsFinishedTerm(text)) continue;
 
             AccessibilityNodeInfo candidate = choosePacketContainer(label);
             if (candidate == null) candidate = label;
-            if (subtreeContainsAny(candidate,
-                    new String[]{"已领取", "已领完", "已被领完", "已过期", "手慢了"}, 3)) {
-                continue;
-            }
+            if (subtreeContainsAny(candidate, FINISHED_TERMS, 3)) continue;
 
             Rect r = bounds(candidate);
             if (r == null) r = bounds(label);
             if (r == null || r.width() < 35 || r.height() < 20) continue;
-
             if (lastPacketRect != null && now - lastPacketAt < 4500L
                     && closeRects(r, lastPacketRect, 42)) continue;
 
-            double score = r.bottom * 20.0 + r.centerY();
-            if (subtreeContainsAny(candidate,
-                    new String[]{"恭喜发财", "大吉大利"}, 3)) score += 1_000_000.0;
-            if (candidate.isClickable()) score += 100_000.0;
+            boolean strong = text.contains("微信红包")
+                    || text.contains("领取红包")
+                    || text.contains("[红包]")
+                    || text.contains("【红包】")
+                    || subtreeContainsAny(candidate,
+                    new String[]{"微信红包", "恭喜发财", "大吉大利"}, 3);
+            boolean structural = candidate.isClickable()
+                    && r.width() >= 120 && r.height() >= 45
+                    && r.width() > r.height() * 1.05f;
+            if (!strong && !structural) continue;
 
+            double score = r.bottom * 20.0 + r.centerY();
+            if (strong) score += 1_000_000.0;
+            if (candidate.isClickable()) score += 100_000.0;
             if (score > bestScore) {
                 bestScore = score;
                 best = new PacketCandidate(candidate, r);
@@ -363,23 +438,14 @@ public class AutoClickAccessibilityService extends AccessibilityService {
 
     private static void collectPacketLabels(
             AccessibilityNodeInfo node, List<AccessibilityNodeInfo> out, int depth, int[] visited) {
-        if (node == null || depth > 12 || visited[0]++ > 420 || out.size() >= 12) return;
+        if (node == null || depth > 13 || visited[0]++ > 480 || out.size() >= 18) return;
         try {
-            if (node.isVisibleToUser() && containsPacketLabel(node)) out.add(node);
-            int n = Math.min(node.getChildCount(), 28);
+            if (node.isVisibleToUser() && nodeText(node).contains("红包")) out.add(node);
+            int n = Math.min(node.getChildCount(), 30);
             for (int i = 0; i < n; i++) {
                 collectPacketLabels(node.getChild(i), out, depth + 1, visited);
             }
         } catch (Throwable ignored) {}
-    }
-
-    private static boolean containsPacketLabel(AccessibilityNodeInfo node) {
-        if (node == null) return false;
-        String t = node.getText() == null ? "" : node.getText().toString().trim();
-        String d = node.getContentDescription() == null
-                ? "" : node.getContentDescription().toString().trim();
-        return t.equals("微信红包") || d.equals("微信红包")
-                || t.contains("微信红包") || d.contains("微信红包");
     }
 
     private static AccessibilityNodeInfo choosePacketContainer(AccessibilityNodeInfo label) {
@@ -390,7 +456,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
             try {
                 if (cur.isVisibleToUser() && cur.isClickable()) return cur;
             } catch (Throwable ignored) {}
-            if (r != null && r.width() >= 120 && r.height() >= 45 && r.height() <= 500) {
+            if (r != null && r.width() >= 100 && r.height() >= 40 && r.height() <= 520) {
                 reasonable = cur;
             }
             cur = cur.getParent();
@@ -464,9 +530,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         AccessibilityNodeInfo best = null;
         double bestScore = -1e30;
         Rect reference = boundsStatic(scope);
-
-        String[] terms = {"開", "开"};
-        for (String term : terms) {
+        for (String term : new String[]{"開", "开"}) {
             List<AccessibilityNodeInfo> nodes;
             try { nodes = scope.findAccessibilityNodeInfosByText(term); }
             catch (Throwable ignored) { continue; }
@@ -507,10 +571,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
                     float dy = Math.abs(r.exactCenterY() - rootRect.exactCenterY());
                     float minSide = Math.min(r.width(), r.height());
                     float maxSide = Math.max(r.width(), r.height());
-                    String text = (node.getText() == null ? "" : node.getText().toString()) + " "
-                            + (node.getContentDescription() == null
-                            ? "" : node.getContentDescription().toString());
-
+                    String text = nodeText(node);
                     boolean sizeOk = minSide >= 28f
                             && r.width() <= rw * 0.55f
                             && r.height() <= rh * 0.30f;
@@ -530,7 +591,6 @@ public class AutoClickAccessibilityService extends AccessibilityService {
                     }
                 }
             }
-
             int count = Math.min(node.getChildCount(), 28);
             for (int i = 0; i < count; i++) {
                 findCentralClickable(node.getChild(i), rootRect, depth + 1, best);
@@ -554,9 +614,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
             AccessibilityNodeInfo node, String[] terms, int depth) {
         if (node == null || terms == null) return false;
         try {
-            String text = (node.getText() == null ? "" : node.getText().toString()) + " "
-                    + (node.getContentDescription() == null
-                    ? "" : node.getContentDescription().toString());
+            String text = nodeText(node);
             for (String term : terms) {
                 if (term != null && text.contains(term)) return true;
             }
@@ -566,6 +624,19 @@ public class AutoClickAccessibilityService extends AccessibilityService {
                 if (subtreeContainsAny(node.getChild(i), terms, depth - 1)) return true;
             }
         } catch (Throwable ignored) {}
+        return false;
+    }
+
+    private static String nodeText(AccessibilityNodeInfo node) {
+        if (node == null) return "";
+        String t = node.getText() == null ? "" : node.getText().toString();
+        String d = node.getContentDescription() == null ? "" : node.getContentDescription().toString();
+        return (t + " " + d).trim();
+    }
+
+    private static boolean containsFinishedTerm(String text) {
+        if (text == null) return false;
+        for (String term : FINISHED_TERMS) if (text.contains(term)) return true;
         return false;
     }
 
@@ -594,6 +665,78 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         if (value == null) return false;
         String s = value.toString().trim();
         return "開".equals(s) || "开".equals(s);
+    }
+
+    private void saveLastSeen(String pkg, String cls) {
+        prefs(this).edit()
+                .putString(KEY_LAST_SEEN_PACKAGE, pkg == null ? "" : pkg)
+                .putString(KEY_LAST_SEEN_CLASS, cls == null ? "" : cls)
+                .putLong(KEY_LAST_DIAG_TIME, System.currentTimeMillis())
+                .apply();
+    }
+
+    private void writeIdentity(String value) {
+        prefs(this).edit().putString(KEY_LAST_IDENTITY, value)
+                .putLong(KEY_LAST_DIAG_TIME, System.currentTimeMillis()).apply();
+    }
+
+    private void writeRootStatus(String value) {
+        prefs(this).edit().putString(KEY_LAST_ROOT, value)
+                .putLong(KEY_LAST_DIAG_TIME, System.currentTimeMillis()).apply();
+    }
+
+    private void writeAction(String value) {
+        prefs(this).edit().putString(KEY_LAST_ACTION, value)
+                .putLong(KEY_LAST_DIAG_TIME, System.currentTimeMillis()).apply();
+    }
+
+    private void updateNodeDiagnostics(AccessibilityNodeInfo root) {
+        int packetCount = countByText(root, "红包");
+        int exactCount = countExactPacket(root);
+        int openCount = countOpen(root);
+        prefs(this).edit()
+                .putInt(KEY_LAST_PACKET_COUNT, packetCount)
+                .putInt(KEY_LAST_EXACT_PACKET_COUNT, exactCount)
+                .putInt(KEY_LAST_OPEN_COUNT, openCount)
+                .putLong(KEY_LAST_DIAG_TIME, System.currentTimeMillis())
+                .apply();
+    }
+
+    private static int countByText(AccessibilityNodeInfo root, String term) {
+        try {
+            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(term);
+            return nodes == null ? 0 : nodes.size();
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    private static int countExactPacket(AccessibilityNodeInfo root) {
+        try {
+            List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText("微信红包");
+            if (nodes == null) return 0;
+            int count = 0;
+            for (AccessibilityNodeInfo n : nodes) {
+                if (nodeText(n).contains("微信红包")) count++;
+            }
+            return count;
+        } catch (Throwable ignored) {
+            return 0;
+        }
+    }
+
+    private static int countOpen(AccessibilityNodeInfo root) {
+        int count = 0;
+        for (String term : new String[]{"開", "开"}) {
+            try {
+                List<AccessibilityNodeInfo> nodes = root.findAccessibilityNodeInfosByText(term);
+                if (nodes == null) continue;
+                for (AccessibilityNodeInfo n : nodes) {
+                    if (isExactOpen(n.getText()) || isExactOpen(n.getContentDescription())) count++;
+                }
+            } catch (Throwable ignored) {}
+        }
+        return count;
     }
 
     private static final class PacketCandidate {
