@@ -57,6 +57,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     protected void onServiceConnected() {
         super.onServiceConnected();
         instance = new WeakReference<>(this);
+        activeWeChatPackage = "";
         resetState();
         restartHeartbeat();
     }
@@ -65,17 +66,20 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     public void onAccessibilityEvent(AccessibilityEvent event) {
         if (event == null || !isAutomationEnabled(this)) return;
 
-        AccessibilityNodeInfo source = null;
-        try { source = event.getSource(); } catch (Throwable ignored) {}
-        if (!isLikelyWeChatEvent(event, source)) return;
+        String pkg = event.getPackageName() == null ? "" : event.getPackageName().toString();
+        String cls = event.getClassName() == null ? "" : event.getClassName().toString();
 
-        CharSequence pkg = event.getPackageName();
-        if (pkg != null && pkg.length() > 0) activeWeChatPackage = pkg.toString();
+        // Absolute safety rule: our own UI must never be treated as WeChat or a clone.
+        if (isSelfPackage(pkg)) return;
+        if (!isWeChatIdentity(pkg, cls)) return;
+
+        if (!pkg.isEmpty()) activeWeChatPackage = pkg;
 
         long now = SystemClock.uptimeMillis();
-        if (source != null && processScope(source, now)) return;
+        AccessibilityNodeInfo source = null;
+        try { source = event.getSource(); } catch (Throwable ignored) {}
 
-        // Immediate full-window fallback. No fixed 25/55 ms delay is added.
+        if (source != null && processScope(source, now)) return;
         processCurrentUi();
     }
 
@@ -85,6 +89,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     @Override
     public boolean onUnbind(Intent intent) {
         handler.removeCallbacksAndMessages(null);
+        activeWeChatPackage = "";
         instance = new WeakReference<>(null);
         return super.onUnbind(intent);
     }
@@ -116,10 +121,12 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         handler.removeCallbacksAndMessages(null);
         sequence++;
         resetState();
-        if (enabled) {
-            handler.post(this::processCurrentUi);
-            restartHeartbeat();
+        if (!enabled) {
+            activeWeChatPackage = "";
+            return;
         }
+        handler.post(this::processCurrentUi);
+        restartHeartbeat();
     }
 
     private void restartHeartbeat() {
@@ -133,32 +140,25 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         lastActionAt = 0L;
     }
 
-    private boolean isLikelyWeChatEvent(AccessibilityEvent event, AccessibilityNodeInfo source) {
-        String pkg = event.getPackageName() == null ? "" : event.getPackageName().toString();
-        if (isWeChatPackageName(pkg)) return true;
-        if (!activeWeChatPackage.isEmpty() && activeWeChatPackage.equals(pkg)) return true;
-
-        String cls = event.getClassName() == null ? "" : event.getClassName().toString();
-        if (cls.startsWith("com.tencent.mm.")) return true;
-
-        // Third-party/system clones can change the package. Trust an event when its changed subtree
-        // already contains a characteristic WeChat red-packet label.
-        return source != null && subtreeContainsAny(source,
-                new String[]{"微信红包", "恭喜发财", "大吉大利"}, 4);
+    private boolean isSelfPackage(String pkg) {
+        return pkg != null && pkg.equals(getPackageName());
     }
 
-    private static boolean isWeChatPackageName(String pkg) {
-        if (pkg == null || pkg.isEmpty()) return false;
-        String p = pkg.toLowerCase(Locale.ROOT);
-        return WECHAT_PACKAGE.equals(p)
+    private static boolean isWeChatIdentity(String pkg, String cls) {
+        String p = pkg == null ? "" : pkg.toLowerCase(Locale.ROOT);
+        String c = cls == null ? "" : cls;
+
+        // Main WeChat and most system dual-app implementations keep the WeChat package identity.
+        if (WECHAT_PACKAGE.equals(p)
                 || p.startsWith(WECHAT_PACKAGE + ".")
-                || p.contains("tencent.mm")
-                || p.contains("wechat")
-                || p.contains("weixin");
+                || p.contains("tencent.mm")) return true;
+
+        // Some clones repackage the APK but keep original WeChat activity/view class names.
+        return c.startsWith("com.tencent.mm.");
     }
 
     private boolean processScope(AccessibilityNodeInfo scope, long now) {
-        if (scope == null) return false;
+        if (scope == null || !canActOnCurrentWindow()) return false;
 
         if (state == WAIT_CLEAR && now - stateSince >= 100L) {
             state = WAIT_PACKET;
@@ -213,14 +213,10 @@ public class AutoClickAccessibilityService extends AccessibilityService {
 
         if (state == WAIT_OPEN) {
             long elapsed = now - stateSince;
-
-            // A verified packet was already clicked. If WeChat draws an unlabeled custom open
-            // button, tap the expected center once after the popup has had time to appear.
             if (elapsed >= 130L && elapsed < 360L && clickExpectedOpenCenterOnce(root)) {
                 enterWaitResult(now);
                 return;
             }
-
             if (elapsed > 1700L) {
                 backOnce();
                 enterWaitClear(now);
@@ -256,8 +252,6 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         stateSince = now;
         int token = ++sequence;
 
-        // Events are primary. These short sparse checks cover WeChat builds that do not emit a
-        // useful event during the popup animation.
         long[] delays = {20L, 45L, 80L, 130L, 210L, 340L, 560L, 900L, 1500L};
         for (long d : delays) {
             handler.postDelayed(() -> {
@@ -290,28 +284,37 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         try {
             AccessibilityNodeInfo root = getRootInActiveWindow();
             if (root == null) return null;
+
             String pkg = root.getPackageName() == null ? "" : root.getPackageName().toString();
-            if (isWeChatPackageName(pkg)) {
-                activeWeChatPackage = pkg;
-                return root;
-            }
-            if (!activeWeChatPackage.isEmpty() && activeWeChatPackage.equals(pkg)) return root;
-
             String cls = root.getClassName() == null ? "" : root.getClassName().toString();
-            if (cls.startsWith("com.tencent.mm.")) {
-                activeWeChatPackage = pkg;
+
+            // Never scan or act on our own UI, Settings, launcher, lock screen, or arbitrary apps.
+            if (isSelfPackage(pkg)) return null;
+
+            if (isWeChatIdentity(pkg, cls)) {
+                if (!pkg.isEmpty()) activeWeChatPackage = pkg;
                 return root;
             }
 
-            // Clone package fallback: if the active root itself exposes a real WeChat packet label,
-            // accept it and remember that package for the rest of this session.
-            if (subtreeContainsAny(root,
-                    new String[]{"微信红包", "恭喜发财", "大吉大利"}, 6)) {
-                activeWeChatPackage = pkg;
-                return root;
-            }
+            // A remembered clone package is accepted only if it was learned earlier from a genuine
+            // WeChat package/class identity. Text such as “微信红包” alone can never teach a package.
+            if (!activeWeChatPackage.isEmpty() && activeWeChatPackage.equals(pkg)) return root;
         } catch (Throwable ignored) {}
         return null;
+    }
+
+    private boolean canActOnCurrentWindow() {
+        try {
+            AccessibilityNodeInfo root = getRootInActiveWindow();
+            if (root == null) return false;
+            String pkg = root.getPackageName() == null ? "" : root.getPackageName().toString();
+            String cls = root.getClassName() == null ? "" : root.getClassName().toString();
+            if (isSelfPackage(pkg)) return false;
+            if (isWeChatIdentity(pkg, cls)) return true;
+            return !activeWeChatPackage.isEmpty() && activeWeChatPackage.equals(pkg);
+        } catch (Throwable ignored) {
+            return false;
+        }
     }
 
     private PacketCandidate findBestRedPacket(AccessibilityNodeInfo scope, long now) {
@@ -384,7 +387,9 @@ public class AutoClickAccessibilityService extends AccessibilityService {
         AccessibilityNodeInfo reasonable = null;
         for (int i = 0; cur != null && i <= 9; i++) {
             Rect r = boundsStatic(cur);
-            if (cur.isVisibleToUser() && cur.isClickable()) return cur;
+            try {
+                if (cur.isVisibleToUser() && cur.isClickable()) return cur;
+            } catch (Throwable ignored) {}
             if (r != null && r.width() >= 120 && r.height() >= 45 && r.height() <= 500) {
                 reasonable = cur;
             }
@@ -394,7 +399,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     }
 
     private boolean clickPacket(PacketCandidate packet) {
-        if (packet == null || packet.node == null) return false;
+        if (packet == null || packet.node == null || !canActOnCurrentWindow()) return false;
         try {
             if (packet.node.isClickable()
                     && packet.node.performAction(AccessibilityNodeInfo.ACTION_CLICK)) return true;
@@ -403,6 +408,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     }
 
     private boolean clickExactOpenOnce(AccessibilityNodeInfo scope) {
+        if (!canActOnCurrentWindow()) return false;
         AccessibilityNodeInfo best = findBestOpenNode(scope);
         if (best == null) return false;
         Rect r = bounds(best);
@@ -415,7 +421,9 @@ public class AutoClickAccessibilityService extends AccessibilityService {
 
     private boolean clickCentralPopupActionOnce(
             AccessibilityNodeInfo scope, Rect rootRect, int maxVisited) {
-        if (scope == null || rootRect == null || rootRect.isEmpty()) return false;
+        if (!canActOnCurrentWindow() || scope == null || rootRect == null || rootRect.isEmpty()) {
+            return false;
+        }
         Candidate best = new Candidate(maxVisited);
         findCentralClickable(scope, rootRect, 0, best);
         if (best.node == null || best.rect == null) return false;
@@ -427,6 +435,7 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     }
 
     private boolean clickExpectedOpenCenterOnce(AccessibilityNodeInfo root) {
+        if (!canActOnCurrentWindow()) return false;
         Rect r = bounds(root);
         if (r == null) return false;
         return clickAt(r.exactCenterX(), r.top + r.height() * 0.525f);
@@ -437,10 +446,11 @@ public class AutoClickAccessibilityService extends AccessibilityService {
     }
 
     private boolean backOnce() {
-        return performGlobalAction(GLOBAL_ACTION_BACK);
+        return canActOnCurrentWindow() && performGlobalAction(GLOBAL_ACTION_BACK);
     }
 
     private boolean clickAt(float x, float y) {
+        if (!canActOnCurrentWindow()) return false;
         Path path = new Path();
         path.moveTo(x, y);
         GestureDescription gesture = new GestureDescription.Builder()
