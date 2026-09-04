@@ -26,6 +26,8 @@ public class WeChatNotificationListener extends NotificationListenerService {
         if (!looksLikeRedPacket(text)) return;
 
         String pkg = sbn.getPackageName() == null ? "" : sbn.getPackageName();
+        if (pkg.isEmpty() || pkg.equals(getPackageName())) return;
+
         String lower = pkg.toLowerCase(Locale.ROOT);
         boolean likelyWeChat = lower.equals("com.tencent.mm")
                 || lower.contains("tencent.mm")
@@ -36,6 +38,10 @@ public class WeChatNotificationListener extends NotificationListenerService {
                 || text.contains("【红包】");
         if (!likelyWeChat) return;
 
+        // An explicit red-packet notification is a strong, low-risk signal for system/vendor
+        // WeChat clones whose package name was changed. Remember it so accessibility can act there.
+        AutoClickAccessibilityService.trustPackageFromRedPacketNotification(this, pkg);
+
         long now = android.os.SystemClock.uptimeMillis();
         if (now - lastOpenAt < 700L) return;
         lastOpenAt = now;
@@ -44,9 +50,7 @@ public class WeChatNotificationListener extends NotificationListenerService {
         if (pi == null) return;
         if (!sendPendingIntent(pi)) return;
 
-        // Give WeChat a few chances to expose the target chat tree. These are sparse and only
-        // scheduled after an explicit red-packet notification, so idle power use stays negligible.
-        long[] delays = {40L, 90L, 160L, 260L, 420L, 700L, 1100L};
+        long[] delays = {30L, 70L, 120L, 200L, 320L, 500L, 800L, 1200L};
         android.os.Handler h = new android.os.Handler(android.os.Looper.getMainLooper());
         for (long delay : delays) {
             h.postDelayed(AutoClickAccessibilityService::requestImmediateCheck, delay);
